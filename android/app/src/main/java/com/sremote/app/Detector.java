@@ -298,6 +298,23 @@ final class Detector {
         return out;
     }
 
+    /** last n screen lines for a live preview: ANSI-free, right-trimmed, blank runs collapsed */
+    List<String> tail(int n) {
+        List<String> out = new ArrayList<>();
+        int end = tail.length();
+        boolean prevBlank = true; // drop trailing blank lines
+        while (end > 0 && out.size() < n) {
+            int start = tail.lastIndexOf("\n", end - 1) + 1;
+            String l = tail.substring(start, end).replaceAll("\\s+$", "");
+            boolean blank = l.isEmpty();
+            if (!(blank && prevBlank)) out.add(0, l.length() > 400 ? l.substring(0, 400) : l);
+            prevBlank = blank;
+            end = start - 1;
+        }
+        while (!out.isEmpty() && out.get(0).isEmpty()) out.remove(0);
+        return out;
+    }
+
     private static String clean(String l) {
         String s = P_DECOR.matcher(l).replaceAll(" ").trim();
         if (s.equals(">") || s.equals("?") || s.startsWith("? for shortcuts")) return "";

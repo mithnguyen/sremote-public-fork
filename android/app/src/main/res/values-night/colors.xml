@@ -2,4 +2,11 @@
 <resources>
     <color name="bg">#121318</color>
     <color name="accent">#B9C3FF</color>
+    <color name="widget_bg">#1E1F25</color>
+    <color name="widget_chip">#2B2C33</color>
+    <color name="widget_fg">#E3E1E9</color>
+    <color name="widget_dim">#A9A8B3</color>
+    <color name="widget_run">#B9C3FF</color>
+    <color name="widget_ask">#F5C26B</color>
+    <color name="widget_done">#7DDC8E</color>
 </resources>

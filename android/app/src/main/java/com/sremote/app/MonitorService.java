@@ -114,6 +114,7 @@ public class MonitorService extends Service {
         conns.clear();
         StateBus.clearAll();
         StateBus.changed();
+        StatusWidget.refresh(this);
         if (client != null) client.dispatcher().executorService().shutdown();
         super.onDestroy();
     }
@@ -147,6 +148,7 @@ public class MonitorService extends Service {
     }
 
     private void refreshStatus() {
+        StatusWidget.refresh(this);
         int up = 0, run = 0, ask = 0;
         for (Conn c : conns.values()) {
             if (c.open) up++;
@@ -390,7 +392,7 @@ public class MonitorService extends Service {
         /** history always; notification unless muted by kind or user is watching this host */
         private void event(String sid, Watch w, String kind, String title, String text, List<Detector.Answer> answers) {
             String sname = w != null ? w.name : sid;
-            EventLog.add(MonitorService.this, host, sname, kind, title, text);
+            EventLog.add(MonitorService.this, host, sname, sid, kind, title, text);
             if (suppressed(host)) return;
             switch (kind) {
                 case EventLog.K_QUESTION:

@@ -16,6 +16,7 @@ public final class Notify {
     public static final String CH_QUESTION = "question"; // session waiting for input — heads-up
     public static final String CH_DONE = "done";         // task finished — heads-up
     public static final String CH_EVENTS = "events";     // session created / ended
+    public static final String CH_QUIET = "quiet";       // anything during quiet hours — silent
 
     static final String EXTRA_HOST = "host", EXTRA_SID = "sid", EXTRA_SNAME = "sname",
             EXTRA_DATA = "data", EXTRA_NID = "nid";
@@ -36,17 +37,34 @@ public final class Notify {
         nm.createNotificationChannel(d);
         nm.createNotificationChannel(new NotificationChannel(
                 CH_EVENTS, "Session started / ended", NotificationManager.IMPORTANCE_DEFAULT));
+        NotificationChannel qt = new NotificationChannel(
+                CH_QUIET, "Quiet hours", NotificationManager.IMPORTANCE_LOW);
+        qt.setDescription("Alerts that arrive during quiet hours — shown without sound or pop-up");
+        nm.createNotificationChannel(qt);
     }
 
     static int nid(Host h, String tag) { return ("sev:" + h.id + ":" + tag).hashCode(); }
 
-    public static PendingIntent openHostIntent(Context c, Host h) {
+    /** quiet hours route alerts to the silent channel (questions may be exempt) */
+    private static String channel(Context c, String ch) {
+        HostStore st = new HostStore(c);
+        if (!st.inQuietHours()) return ch;
+        if (ch.equals(CH_QUESTION) && st.quietAllowQuestions()) return ch;
+        return CH_QUIET;
+    }
+
+    public static PendingIntent openHostIntent(Context c, Host h) { return openIntent(c, h, null); }
+
+    /** tap → terminal, deep-linked to the session when known */
+    static PendingIntent openIntent(Context c, Host h, String sid) {
         Intent i = new Intent(c, HostActivity.class);
         i.putExtra(HostActivity.EXTRA_HOST_ID, h.id);
         i.putExtra(HostActivity.EXTRA_NAME, h.name);
         i.putExtra(HostActivity.EXTRA_URL, h.url);
+        if (sid != null) i.putExtra(HostActivity.EXTRA_HASH, "s=" + sid);
         i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-        return PendingIntent.getActivity(c, h.id.hashCode(), i,
+        int rc = sid == null ? h.id.hashCode() : (h.id + ":" + sid).hashCode();
+        return PendingIntent.getActivity(c, rc, i,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
     }
 
@@ -95,28 +113,33 @@ public final class Notify {
     static void question(Context c, Host h, String sid, String sname, String text, List<Detector.Answer> answers) {
         ensureChannels(c);
         int id = nid(h, "q:" + sid);
-        Notification.Builder b = base(c, CH_QUESTION, h, sname + " needs your input", text)
+        String ch = channel(c, CH_QUESTION);
+        Notification.Builder b = base(c, ch, h, sname + " needs your input", text)
+                .setContentIntent(openIntent(c, h, sid))
                 .setCategory(Notification.CATEGORY_REMINDER);
         int i = 0;
         for (Detector.Answer a : answers) if (i < 2) b.addAction(answerAction(c, h, sid, sname, id, i++, a));
         b.addAction(replyAction(c, h, sid, sname, id, "Reply", "Answer for " + sname));
-        c.getSystemService(NotificationManager.class).notify(id, b.build());
+        c.getSystemService(NotificationManager.class).notify(id, b.build());
     }
 
     static void done(Context c, Host h, String sid, String sname, String title, String text) {
         ensureChannels(c);
         int id = nid(h, "d:" + sid);
         cancel(c, h, "q:" + sid);
-        Notification.Builder b = base(c, CH_DONE, h, title, text)
+        String ch = channel(c, CH_DONE);
+        Notification.Builder b = base(c, ch, h, title, text)
+                .setContentIntent(openIntent(c, h, sid))
                 .setCategory(Notification.CATEGORY_STATUS)
                 .addAction(replyAction(c, h, sid, sname, id, "Run command", "Command for " + sname));
-        c.getSystemService(NotificationManager.class).notify(id, b.build());
+        c.getSystemService(NotificationManager.class).notify(id, b.build());
     }
 
     static void session(Context c, Host h, String tag, String title, String text) {
         ensureChannels(c);
-        Notification n = base(c, CH_EVENTS, h, title, text).build();
-        c.getSystemService(NotificationManager.class).notify(nid(h, tag), n);
+        String ch = channel(c, CH_EVENTS);
+        Notification n = base(c, ch, h, title, text).build();
+        c.getSystemService(NotificationManager.class).notify(nid(h, tag), n);
     }
 
     static void cancel(Context c, Host h, String tag) {

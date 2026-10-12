@@ -22,6 +22,10 @@ final class EventLog {
     }
 
     static synchronized void add(Context c, Host h, String session, String kind, String title, String text) {
+        add(c, h, session, null, kind, title, text);
+    }
+
+    static synchronized void add(Context c, Host h, String session, String sid, String kind, String title, String text) {
         try {
             JSONArray old = new JSONArray(sp(c).getString(KEY, "[]"));
             JSONArray out = new JSONArray();
@@ -29,6 +33,7 @@ final class EventLog {
                     .put("t", System.currentTimeMillis())
                     .put("host", h.id).put("hostName", h.name)
                     .put("session", session == null ? "" : session)
+                    .put("sid", sid == null ? "" : sid)
                     .put("kind", kind).put("title", title).put("text", text == null ? "" : text));
             for (int i = 0; i < old.length() && out.length() < CAP; i++) out.put(old.get(i));
             sp(c).edit().putString(KEY, out.toString()).apply();

@@ -48,6 +48,27 @@
             android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize"
             android:launchMode="singleTop" />
 
+        <activity
+            android:name=".HostDetailActivity"
+            android:exported="false" />
+
+        <activity
+            android:name=".OnboardingActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+
+        <!-- home screen widget: live session counts -->
+        <receiver
+            android:name=".StatusWidget"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_status_info" />
+        </receiver>
+
         <service
             android:name=".MonitorService"
             android:exported="false"

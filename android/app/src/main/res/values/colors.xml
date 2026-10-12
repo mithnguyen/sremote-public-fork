@@ -5,4 +5,12 @@
     <color name="accent">#4C5C92</color>
     <!-- launcher icon keeps its dark brand tile regardless of theme -->
     <color name="launcher_bg">#0A0D12</color>
+    <!-- home screen widget -->
+    <color name="widget_bg">#F2F0F7</color>
+    <color name="widget_chip">#E4E1EC</color>
+    <color name="widget_fg">#1B1B21</color>
+    <color name="widget_dim">#5E5E6A</color>
+    <color name="widget_run">#4C5C92</color>
+    <color name="widget_ask">#8A5A00</color>
+    <color name="widget_done">#1E7A3A</color>
 </resources>

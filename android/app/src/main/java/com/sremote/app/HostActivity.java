@@ -41,6 +41,8 @@ public class HostActivity extends Activity {
     public static final String EXTRA_HOST_ID = "host_id";
     public static final String EXTRA_NAME = "name";
     public static final String EXTRA_URL = "url";
+    /** web UI deep link: "s=<sid>" | "ws=<id>" | "screen" */
+    public static final String EXTRA_HASH = "hash";
 
     private static final int REQ_FILE = 77;
 
@@ -80,22 +82,32 @@ public class HostActivity extends Activity {
         bar.addView(back);
 
         LinearLayout tc = ui.vcol();
+        LinearLayout tl = ui.hrow();
         titleView = ui.oneLine(ui.text(name, 16, ui.onSurface, true));
+        tl.addView(titleView, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0));
+        tl.addView(ui.icon(R.drawable.ic_expand, ui.onSurfaceVariant, 18));
         LinearLayout st = ui.hrow();
         statusDot = ui.dot(ui.outline, 7);
         st.addView(statusDot);
         statusView = ui.oneLine(ui.text("", 12, ui.onSurfaceVariant, false));
         statusView.setPadding(dp(6), 0, 0, 0);
         st.addView(statusView);
-        tc.addView(titleView); tc.addView(st);
+        tc.addView(tl); tc.addView(st);
+        tc.setPadding(dp(8), dp(4), dp(8), dp(4));
+        tc.setBackground(ui.ripple(ui.round(0x00000000, 12), 12));
+        tc.setOnClickListener(v -> switchHost()); // tap the title → jump to another host
         LinearLayout.LayoutParams tlp = Ui.weight1();
-        tlp.setMargins(dp(4), 0, 0, 0);
+        tlp.setMargins(dp(2), 0, 0, 0);
         bar.addView(tc, tlp);
 
-        ImageView reload = ui.iconButton(R.drawable.ic_refresh, ui.onSurfaceVariant);
-        reload.setContentDescription("Reload");
-        reload.setOnClickListener(v -> { errView.setVisibility(View.GONE); web.reload(); });
-        bar.addView(reload);
+        ImageView desk = ui.iconButton(R.drawable.ic_desktop, ui.onSurfaceVariant);
+        desk.setContentDescription("Remote desktop");
+        desk.setOnClickListener(v -> navigate("screen"));
+        bar.addView(desk);
+        ImageView more = ui.iconButton(R.drawable.ic_more, ui.onSurfaceVariant);
+        more.setContentDescription("More");
+        more.setOnClickListener(v -> moreMenu());
+        bar.addView(more);
         root.addView(bar);
 
         // content: webview + error overlay
@@ -154,7 +166,67 @@ public class HostActivity extends Activity {
         }
 
         setupWeb();
-        web.loadUrl(url);
+        web.loadUrl(withHash(url, getIntent().getStringExtra(EXTRA_HASH)));
+    }
+
+    private static String withHash(String base, String hash) {
+        return hash == null || hash.isEmpty() ? base : base + "/#" + hash;
+    }
+
+    /** deep link inside the already-loaded page (no reload); old servers just ignore it */
+    private void navigate(String hash) {
+        if (web == null) return;
+        web.evaluateJavascript("location.hash=" + org.json.JSONObject.quote(hash), null);
+    }
+
+    private void switchHost() {
+        List<Host> hs = new HostStore(this).list();
+        if (hs.size() < 2) { Toast.makeText(this, "Add more hosts to switch between them", Toast.LENGTH_SHORT).show(); return; }
+        String[] labels = new String[hs.size()];
+        int[] icons = new int[hs.size()];
+        for (int i = 0; i < hs.size(); i++) {
+            Host h = hs.get(i);
+            labels[i] = h.name + (h.id.equals(hostId) ? "  (current)" : "");
+            icons[i] = h.id.equals(hostId) ? R.drawable.ic_check : R.drawable.ic_hosts;
+        }
+        ui.menuSheet(this, "Switch host", labels, icons, i -> {
+            Host h = hs.get(i);
+            if (h.id.equals(hostId)) return;
+            onNewIntent(new Intent().putExtra(EXTRA_URL, h.url).putExtra(EXTRA_NAME, h.name).putExtra(EXTRA_HOST_ID, h.id));
+        }).show();
+    }
+
+    private void moreMenu() {
+        HostStore store = new HostStore(this);
+        Host h = hostId != null ? store.find(hostId) : null;
+        boolean keep = store.keepScreenOn();
+        ui.menuSheet(this, name,
+                new String[]{"Reload", "New session", "Host details", keep ? "Let screen sleep" : "Keep screen on",
+                        "Open in browser", "Copy address"},
+                new int[]{R.drawable.ic_refresh, R.drawable.ic_add, R.drawable.ic_info, R.drawable.ic_moon,
+                        R.drawable.ic_open, R.drawable.ic_copy},
+                i -> {
+                    switch (i) {
+                        case 0: errView.setVisibility(View.GONE); web.reload(); break;
+                        case 1: if (h != null) Actions.newSession(this, h, null); break;
+                        case 2: if (h != null) Actions.openDetail(this, h); break;
+                        case 3: store.setKeepScreenOn(!keep); applyKeepScreen(); break;
+                        case 4:
+                            try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url))); }
+                            catch (ActivityNotFoundException ignored) {}
+                            break;
+                        case 5:
+                            android.content.ClipboardManager cm = getSystemService(android.content.ClipboardManager.class);
+                            cm.setPrimaryClip(android.content.ClipData.newPlainText("S-remote", url));
+                            Toast.makeText(this, "Copied " + url, Toast.LENGTH_SHORT).show();
+                            break;
+                    }
+                }).show();
+    }
+
+    private void applyKeepScreen() {
+        if (new HostStore(this).keepScreenOn()) getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        else getWindow().clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
     }
 
     private void setKbShift(int kb) {
@@ -355,6 +427,7 @@ public class HostActivity extends Activity {
     @Override protected void onNewIntent(Intent i) {
         super.onNewIntent(i);
         String u = i.getStringExtra(EXTRA_URL);
+        String hash = i.getStringExtra(EXTRA_HASH);
         if (u != null && !u.equals(url)) {
             url = u; name = i.getStringExtra(EXTRA_NAME);
             hostId = i.getStringExtra(EXTRA_HOST_ID);
@@ -362,8 +435,8 @@ public class HostActivity extends Activity {
             titleView.setText(name);
             renderStatus();
             errView.setVisibility(View.GONE);
-            web.loadUrl(url);
-        }
+            web.loadUrl(withHash(url, hash));
+        } else if (hash != null) navigate(hash);
     }
 
     // ---------- lifecycle: app lock, notification suppression, live status ----------
@@ -373,6 +446,7 @@ public class HostActivity extends Activity {
     @Override protected void onResume() {
         super.onResume();
         LockGate.check(this);
+        applyKeepScreen();
         StateBus.foregroundHost = hostId;
         StateBus.listen(onState);
         renderStatus();

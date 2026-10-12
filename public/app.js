@@ -125,6 +125,8 @@ function connect() {
           if (pick) select(pick.id); else { activeId = null; updateEmpty(); renderTabs(); }
         }
         screenResub(); // re-subscribe screen after reconnect
+        sessLoaded = true;
+        applyRoute();
         break;
       case "out": {
         const p = panes.get(m.id);
@@ -216,6 +218,29 @@ function goHome() {
   showView("home");
 }
 $("#home-btn").onclick = goHome;
+
+// ---------- deep links (Android app): #s=<sid> | #ws=<id> | #screen ----------
+// applied once sessions/workspaces are known; the hash is cleared afterwards so
+// the app can send the same link again and still get a hashchange
+let wsLoaded = false, sessLoaded = false;
+function applyRoute() {
+  const raw = location.hash.replace(/^#/, "");
+  if (!raw || !wsLoaded || !sessLoaded) return;  // retried when the missing list arrives
+  const q = new URLSearchParams(raw);
+  const sid = q.get("s"), wsId = q.get("ws");
+  if (sid) {
+    const s = sessions.find((x) => x.id === sid);
+    if (s) {
+      if (view !== "work" || (currentWs ?? null) !== (s.workspace || null)) enterWorkspace(s.workspace || null);
+      select(sid);
+    }
+  } else if (wsId && wsById(wsId)) {
+    enterWorkspace(wsId);
+  }
+  if (q.has("screen")) $("#screen-btn").click();
+  history.replaceState(null, "", location.pathname + location.search);
+}
+window.addEventListener("hashchange", applyRoute);
 
 // ---------- sessions / panes ----------
 function ensurePane(id) {
@@ -633,8 +658,10 @@ function updateEmpty() {
 // ---------- workspaces ----------
 async function loadWorkspaces() {
   workspaces = await fetch("/api/workspaces").then((r) => r.json()).catch(() => []);
+  wsLoaded = true;
   renderAll();
   setTitle();
+  applyRoute();
 }
 
 // ---------- sidebar / files panel toggles ----------

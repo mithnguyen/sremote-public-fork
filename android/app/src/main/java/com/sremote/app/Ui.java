@@ -32,8 +32,10 @@ final class Ui {
 
     Ui(Context ctx) {
         c = ctx;
-        dark = (ctx.getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK)
-                == Configuration.UI_MODE_NIGHT_YES;
+        String mode = new HostStore(ctx).theme();
+        dark = HostStore.THEME_DARK.equals(mode) || (!HostStore.THEME_LIGHT.equals(mode)
+                && (ctx.getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK)
+                == Configuration.UI_MODE_NIGHT_YES);
         if (Build.VERSION.SDK_INT >= 31) {
             if (dark) {
                 surface = sys(android.R.color.system_neutral1_900);
@@ -336,6 +338,217 @@ final class Ui {
             case EXITED: return "Exited";
             default: return "Idle";
         }
+    }
+
+    // ---------- host colour tags ----------
+    /** slot 0 follows the dynamic accent; 1..6 fixed tones (blue, green, amber, pink, purple, teal) */
+    static final int HOST_COLORS = 7;
+    private static final int[] HC_LIGHT_BG = {0, 0xFFD6E3FF, 0xFFC8F0D0, 0xFFFFE0B2, 0xFFFFD8E8, 0xFFE8DDFF, 0xFFC4EFEA};
+    private static final int[] HC_LIGHT_FG = {0, 0xFF0B3D91, 0xFF0F5223, 0xFF6B3E00, 0xFF7A1846, 0xFF3F1F8C, 0xFF00504A};
+    private static final int[] HC_DARK_BG = {0, 0xFF1F3A66, 0xFF1C4428, 0xFF4E3410, 0xFF5A2140, 0xFF3A2C66, 0xFF0F443F};
+    private static final int[] HC_DARK_FG = {0, 0xFFBFD3FF, 0xFFA8E6B6, 0xFFFFD08A, 0xFFFFB6D3, 0xFFD4C6FF, 0xFF9EE8DE};
+
+    int hostBg(int i) { i = Math.floorMod(i, HOST_COLORS); return i == 0 ? primaryContainer : (dark ? HC_DARK_BG : HC_LIGHT_BG)[i]; }
+    int hostFg(int i) { i = Math.floorMod(i, HOST_COLORS); return i == 0 ? onPrimaryContainer : (dark ? HC_DARK_FG : HC_LIGHT_FG)[i]; }
+
+    TextView hostAvatar(Host h, float size) {
+        TextView t = avatar(h.name, hostBg(h.colorIndex()), hostFg(h.colorIndex()));
+        t.setLayoutParams(new LinearLayout.LayoutParams(dp(size), dp(size)));
+        t.setTextSize(size * 0.42f);
+        return t;
+    }
+
+    // ---------- 2.0 widgets ----------
+    /** themed single-line input on a rounded container (explicit colours: survives theme override) */
+    android.widget.EditText input(CharSequence hint) {
+        android.widget.EditText e = new android.widget.EditText(c);
+        e.setHint(hint);
+        e.setTextColor(onSurface);
+        e.setHintTextColor(onSurfaceVariant);
+        e.setTextSize(15);
+        e.setSingleLine(true);
+        e.setPadding(dp(16), dp(12), dp(16), dp(12));
+        e.setBackground(stroke(containerHigh, 14, outlineVariant));
+        return e;
+    }
+
+    /** search box: magnifier + input on a pill */
+    LinearLayout searchField(CharSequence hint, android.widget.EditText[] out) {
+        LinearLayout r = hrow();
+        r.setPadding(dp(16), 0, dp(8), 0);
+        r.setMinimumHeight(dp(52));
+        r.setBackground(round(containerHigh, 26));
+        r.addView(icon(R.drawable.ic_search, onSurfaceVariant, 22));
+        android.widget.EditText e = new android.widget.EditText(c);
+        e.setHint(hint);
+        e.setTextColor(onSurface);
+        e.setHintTextColor(onSurfaceVariant);
+        e.setTextSize(15);
+        e.setSingleLine(true);
+        e.setBackground(null);
+        e.setPadding(dp(12), dp(10), dp(8), dp(10));
+        r.addView(e, weight1());
+        out[0] = e;
+        return r;
+    }
+
+    /** dashboard number tile */
+    LinearLayout statTile(String num, String label, int fg, int bg) {
+        LinearLayout t = vcol();
+        t.setPadding(dp(14), dp(12), dp(10), dp(12));
+        t.setBackground(round(bg, 20));
+        TextView n = text(num, 24, fg, true);
+        t.addView(n);
+        TextView l = oneLine(text(label, 12, fg, false));
+        l.setAlpha(0.85f);
+        t.addView(l);
+        return t;
+    }
+
+    /** section title with optional trailing action */
+    LinearLayout section(CharSequence title, View trailing) {
+        LinearLayout h = hrow();
+        h.setPadding(dp(4), dp(20), 0, dp(8));
+        TextView t = text(title, 15, onSurface, true);
+        h.addView(t, weight1());
+        if (trailing != null) h.addView(trailing);
+        return h;
+    }
+
+    /** list item: leading icon in a tonal circle · title/subtitle · trailing */
+    LinearLayout listRow(int iconRes, int fg, int bg, CharSequence title, CharSequence sub, View trailing) {
+        LinearLayout r = hrow();
+        r.setPadding(dp(12), dp(10), dp(12), dp(10));
+        r.setMinimumHeight(dp(60));
+        r.setBackground(ripple(round(0x00000000, 16), 16));
+        if (iconRes != 0) {
+            android.widget.FrameLayout ic = new android.widget.FrameLayout(c);
+            ic.setBackground(oval(bg));
+            ic.addView(icon(iconRes, fg, 20), new android.widget.FrameLayout.LayoutParams(dp(20), dp(20), Gravity.CENTER));
+            r.addView(ic, new LinearLayout.LayoutParams(dp(40), dp(40)));
+        }
+        LinearLayout tc = vcol();
+        tc.setPadding(dp(iconRes != 0 ? 14 : 4), 0, dp(8), 0);
+        tc.addView(oneLine(text(title, 15, onSurface, true)));
+        if (sub != null && sub.length() > 0) tc.addView(oneLine(text(sub, 13, onSurfaceVariant, false)));
+        r.addView(tc, weight1());
+        if (trailing != null) r.addView(trailing);
+        return r;
+    }
+
+    /** centred empty state */
+    LinearLayout emptyState(int iconRes, CharSequence title, CharSequence sub) {
+        LinearLayout e = vcol();
+        e.setGravity(Gravity.CENTER_HORIZONTAL);
+        e.setPadding(dp(24), dp(32), dp(24), dp(32));
+        e.setBackground(round(container, 24));
+        e.addView(icon(iconRes, primary, 40));
+        TextView t = text(title, 17, onSurface, false);
+        t.setGravity(Gravity.CENTER);
+        t.setPadding(0, dp(12), 0, dp(4));
+        e.addView(t);
+        if (sub != null) {
+            TextView s = text(sub, 14, onSurfaceVariant, false);
+            s.setGravity(Gravity.CENTER);
+            e.addView(s);
+        }
+        return e;
+    }
+
+    /** small counter badge (nav bar) */
+    TextView badge(int n) {
+        TextView t = text(n > 99 ? "99+" : String.valueOf(n), 10, 0xFFFFFFFF, true);
+        t.setGravity(Gravity.CENTER);
+        t.setMinWidth(dp(16));
+        t.setPadding(dp(4), 0, dp(4), 0);
+        t.setBackground(round(dark ? 0xFFE5534B : 0xFFBA1A1A, 8));
+        return t;
+    }
+
+    /** square icon action tile (host detail) */
+    LinearLayout actionTile(int iconRes, CharSequence label) {
+        LinearLayout t = vcol();
+        t.setGravity(Gravity.CENTER);
+        t.setPadding(dp(4), dp(14), dp(4), dp(12));
+        t.setBackground(ripple(round(secondaryContainer, 20), 20));
+        t.addView(icon(iconRes, onSecondaryContainer, 24));
+        TextView l = oneLine(text(label, 12, onSecondaryContainer, true));
+        l.setGravity(Gravity.CENTER);
+        l.setPadding(0, dp(6), 0, 0);
+        t.addView(l);
+        return t;
+    }
+
+    void haptic(View v) {
+        try { v.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY); } catch (Exception ignored) {}
+    }
+
+    /**
+     * bottom sheet: a dialog pinned to the bottom with a drag handle and
+     * rounded top corners; content is scrollable up to ~88% of the screen
+     */
+    android.app.Dialog sheet(Activity a, View content) {
+        android.app.Dialog d = new android.app.Dialog(a, dark
+                ? android.R.style.Theme_DeviceDefault_Dialog_NoActionBar
+                : android.R.style.Theme_DeviceDefault_Light_Dialog_NoActionBar);
+        LinearLayout box = vcol();
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(container);
+        float r = dp(28);
+        bg.setCornerRadii(new float[]{r, r, r, r, 0, 0, 0, 0});
+        box.setBackground(bg);
+        box.setPadding(0, dp(10), 0, dp(12));
+        View handle = new View(c);
+        handle.setBackground(round(outlineVariant, 2));
+        LinearLayout.LayoutParams hlp = new LinearLayout.LayoutParams(dp(32), dp(4));
+        hlp.gravity = Gravity.CENTER_HORIZONTAL;
+        hlp.bottomMargin = dp(10);
+        box.addView(handle, hlp);
+        android.widget.ScrollView sv = new android.widget.ScrollView(c);
+        sv.addView(content);
+        box.addView(sv, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        d.setContentView(box);
+        Window w = d.getWindow();
+        if (w != null) {
+            w.setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(0));
+            w.setGravity(Gravity.BOTTOM);
+            w.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            w.setWindowAnimations(android.R.style.Animation_InputMethod);
+            w.setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+        }
+        int maxH = (int) (a.getResources().getDisplayMetrics().heightPixels * 0.88f);
+        box.getViewTreeObserver().addOnGlobalLayoutListener(() -> {
+            if (box.getHeight() > maxH && w != null) w.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, maxH);
+        });
+        d.setCanceledOnTouchOutside(true);
+        return d;
+    }
+
+    /** simple action list inside a sheet */
+    android.app.Dialog menuSheet(Activity a, CharSequence title, String[] labels, int[] icons, java.util.function.IntConsumer pick) {
+        LinearLayout col = vcol();
+        col.setPadding(dp(12), 0, dp(12), dp(4));
+        if (title != null) {
+            TextView t = oneLine(text(title, 16, onSurface, true));
+            t.setPadding(dp(12), 0, dp(12), dp(8));
+            col.addView(t);
+        }
+        android.app.Dialog[] ref = new android.app.Dialog[1];
+        for (int i = 0; i < labels.length; i++) {
+            final int idx = i;
+            LinearLayout r = hrow();
+            r.setPadding(dp(12), dp(14), dp(12), dp(14));
+            r.setBackground(ripple(round(0x00000000, 16), 16));
+            if (icons != null && icons[i] != 0) {
+                r.addView(icon(icons[i], onSurfaceVariant, 22));
+                r.addView(new View(c), new LinearLayout.LayoutParams(dp(16), 1));
+            }
+            r.addView(text(labels[i], 15, onSurface, false), weight1());
+            r.setOnClickListener(v -> { ref[0].dismiss(); pick.accept(idx); });
+            col.addView(r);
+        }
+        ref[0] = sheet(a, col);
+        return ref[0];
     }
 
     static String ago(long t) {

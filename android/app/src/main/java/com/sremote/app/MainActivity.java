@@ -4,18 +4,21 @@ import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.StatusBarManager;
+import android.app.TimePickerDialog;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.ComponentName;
 import android.content.Intent;
 import android.content.pm.PackageManager;
-import android.content.pm.ShortcutInfo;
-import android.content.pm.ShortcutManager;
 import android.graphics.drawable.Icon;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
+import android.text.Editable;
 import android.text.InputType;
+import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -39,49 +42,53 @@ import java.util.Date;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
-
-import okhttp3.OkHttpClient;
-import okhttp3.Request;
-import okhttp3.Response;
 
 public class MainActivity extends Activity {
     static final String ACTION_OPEN_HOST = "com.sremote.app.OPEN_HOST";
     private static final int REQ_NOTIF = 42;
-    private static final long RESCAN_MS = 30_000, POLL_MS = 10_000;
-    private static final int TAB_HOSTS = 0, TAB_ACTIVITY = 1, TAB_SETTINGS = 2;
+    private static final long RESCAN_MS = 30_000, POLL_MS = 10_000, RECENT_DONE_MS = 10 * 60_000;
+    private static final int TAB_HOME = 0, TAB_SESSIONS = 1, TAB_ACTIVITY = 2, TAB_SETTINGS = 3;
 
     private HostStore store;
     private Ui ui;
     private final Handler main = new Handler(Looper.getMainLooper());
-    private final ExecutorService pool = Executors.newFixedThreadPool(4);
-    private final OkHttpClient http = new OkHttpClient.Builder()
-            .connectTimeout(4, TimeUnit.SECONDS)
-            .readTimeout(8, TimeUnit.SECONDS).build();
 
     private final List<Host> hosts = new ArrayList<>();
     private final List<JSONObject> machines = new ArrayList<>();
     private final Map<String, HStat> stats = new HashMap<>();
     private long lastScan = 0;
-    private boolean scanning = false, resumed = false;
-    private int tab = TAB_HOSTS;
-    private String activityFilter = "all";
+    private boolean scanning = false, resumed = false, machinesOpen = true;
+    private int tab = TAB_HOME;
+    private String activityFilter = "all", activityHost = null, sessFilter = "all", sessQuery = "";
 
     // views
     private FrameLayout content;
     private View fab;
-    private final View[] pages = new View[3];
-    private final LinearLayout[] navItems = new LinearLayout[3];
-    private LinearLayout hostList, machineList, banners, activityList, activityChips, settingsBody;
-    private TextView machinesStatus;
+    private final View[] pages = new View[4];
+    private final LinearLayout[] navItems = new LinearLayout[4];
+    private final FrameLayout[] navBadges = new FrameLayout[4];
+    private LinearLayout homeStats, banners, attention, hostList, machineList, sessChips, sessList,
+            activityList, activityChips, settingsBody;
+    private TextView greeting, machinesStatus;
 
-    /** polled liveness per host */
-    private static final class HStat { boolean online; long ms; int live = -1, total = -1; }
+    /** polled liveness + session list per host */
+    private static final class HStat { boolean online; long ms; String platform = ""; JSONArray sessions; }
 
-    private final Runnable onBus = () -> { if (tab == TAB_HOSTS) renderHosts(); else if (tab == TAB_ACTIVITY) renderActivity(); };
+    /** live state churns while output flows — redraw at most ~1/s, and never the settings form */
+    private long lastBusRender;
+    private boolean busQueued;
+    private final Runnable busRender = () -> {
+        busQueued = false;
+        lastBusRender = System.currentTimeMillis();
+        if (tab != TAB_SETTINGS) renderCurrent(); else renderBadges();
+    };
+    private final Runnable onBus = () -> {
+        if (busQueued) return;
+        busQueued = true;
+        main.postDelayed(busRender, Math.max(0, 800 - (System.currentTimeMillis() - lastBusRender)));
+    };
     private final Runnable poller = new Runnable() {
         @Override public void run() {
             if (!resumed) return;
@@ -101,8 +108,9 @@ public class MainActivity extends Activity {
         ui.applyWindow(this, ui.surface);
         buildShell();
         reload();
-        selectTab(TAB_HOSTS);
+        selectTab(TAB_HOME);
         handleIntent(getIntent());
+        if (hosts.isEmpty() && !store.onboarded()) startActivity(new Intent(this, OnboardingActivity.class));
     }
 
     @Override protected void onNewIntent(Intent i) {
@@ -114,7 +122,7 @@ public class MainActivity extends Activity {
     private void handleIntent(Intent i) {
         if (i == null || !ACTION_OPEN_HOST.equals(i.getAction())) return;
         Host h = store.find(i.getStringExtra(HostActivity.EXTRA_HOST_ID));
-        if (h != null) launch(h);
+        if (h != null) Actions.openTerminal(this, h, null);
     }
 
     @Override protected void onStart() { super.onStart(); LockGate.onStart(); }
@@ -129,9 +137,8 @@ public class MainActivity extends Activity {
         StateBus.listen(onBus);
         main.removeCallbacks(poller);
         main.post(poller);
-        if (tab == TAB_HOSTS) refreshBanners();
-        if (tab == TAB_SETTINGS) buildSettings();
-        if (tab == TAB_ACTIVITY) renderActivity();
+        if (tab == TAB_HOME) refreshBanners();
+        renderCurrent();
     }
 
     @Override protected void onPause() {
@@ -141,14 +148,19 @@ public class MainActivity extends Activity {
         super.onPause();
     }
 
-    @Override protected void onDestroy() {
-        pool.shutdownNow();
-        super.onDestroy();
+    @Override public void onBackPressed() {
+        if (tab != TAB_HOME) selectTab(TAB_HOME);
+        else super.onBackPressed();
     }
 
-    @Override public void onBackPressed() {
-        if (tab != TAB_HOSTS) selectTab(TAB_HOSTS);
-        else super.onBackPressed();
+    private void renderCurrent() {
+        switch (tab) {
+            case TAB_HOME: renderHome(); break;
+            case TAB_SESSIONS: renderSessions(); break;
+            case TAB_ACTIVITY: renderActivity(); break;
+            default: buildSettings();
+        }
+        renderBadges();
     }
 
     // ---------------- shell: pages + bottom navigation + FAB ----------------
@@ -163,16 +175,18 @@ public class MainActivity extends Activity {
         LinearLayout nav = ui.hrow();
         nav.setBackgroundColor(ui.container);
         nav.setPadding(0, dp(10), 0, dp(14));
-        String[] labels = {"Hosts", "Activity", "Settings"};
-        int[] icons = {R.drawable.ic_hosts, R.drawable.ic_bell, R.drawable.ic_tune};
-        for (int i = 0; i < 3; i++) {
+        String[] labels = {"Home", "Sessions", "Activity", "Settings"};
+        int[] icons = {R.drawable.ic_home, R.drawable.ic_list, R.drawable.ic_bell, R.drawable.ic_tune};
+        for (int i = 0; i < 4; i++) {
             final int idx = i;
             LinearLayout it = ui.vcol();
             it.setGravity(Gravity.CENTER_HORIZONTAL);
             FrameLayout pill = new FrameLayout(this);
             ImageView ic = ui.icon(icons[i], ui.onSurfaceVariant, 24);
-            FrameLayout.LayoutParams ilp = new FrameLayout.LayoutParams(dp(24), dp(24), Gravity.CENTER);
-            pill.addView(ic, ilp);
+            pill.addView(ic, new FrameLayout.LayoutParams(dp(24), dp(24), Gravity.CENTER));
+            FrameLayout badge = new FrameLayout(this);
+            pill.addView(badge, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(16), Gravity.TOP | Gravity.END));
+            navBadges[i] = badge;
             it.addView(pill, new LinearLayout.LayoutParams(dp(64), dp(32)));
             TextView lb = ui.text(labels[i], 12, ui.onSurfaceVariant, true);
             lb.setPadding(0, dp(4), 0, 0);
@@ -184,7 +198,8 @@ public class MainActivity extends Activity {
         col.addView(nav);
         root.addView(col);
 
-        pages[TAB_HOSTS] = buildHostsPage();
+        pages[TAB_HOME] = buildHomePage();
+        pages[TAB_SESSIONS] = buildSessionsPage();
         pages[TAB_ACTIVITY] = buildActivityPage();
         pages[TAB_SETTINGS] = buildSettingsPage();
         for (View p : pages) content.addView(p);
@@ -198,7 +213,7 @@ public class MainActivity extends Activity {
         TextView fl = ui.text("Add host", 15, ui.onPrimaryContainer, true);
         fl.setPadding(dp(10), 0, 0, 0);
         f.addView(fl);
-        f.setOnClickListener(v -> hostDialog(null));
+        f.setOnClickListener(v -> Actions.hostEditor(this, null, h -> { reload(); pollHosts(); }));
         FrameLayout.LayoutParams flp = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM | Gravity.END);
         flp.setMargins(0, 0, dp(16), dp(96));
@@ -210,7 +225,7 @@ public class MainActivity extends Activity {
 
     private void selectTab(int t) {
         tab = t;
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < 4; i++) {
             boolean on = i == t;
             pages[i].setVisibility(on ? View.VISIBLE : View.GONE);
             LinearLayout it = navItems[i];
@@ -221,10 +236,19 @@ public class MainActivity extends Activity {
             ic.setImageTintList(android.content.res.ColorStateList.valueOf(on ? ui.onSecondaryContainer : ui.onSurfaceVariant));
             lb.setTextColor(on ? ui.onSurface : ui.onSurfaceVariant);
         }
-        fab.setVisibility(t == TAB_HOSTS ? View.VISIBLE : View.GONE);
-        if (t == TAB_HOSTS) { renderHosts(); refreshBanners(); }
-        else if (t == TAB_ACTIVITY) renderActivity();
-        else buildSettings();
+        fab.setVisibility(t == TAB_HOME ? View.VISIBLE : View.GONE);
+        if (t == TAB_HOME) refreshBanners();
+        renderCurrent();
+    }
+
+    /** red counters on the nav: sessions waiting for input */
+    private void renderBadges() {
+        int ask = 0;
+        for (Host h : hosts) for (StateBus.Sess s : StateBus.sessions(h.id)) if (s.state == Detector.State.QUESTION) ask++;
+        for (int i = 0; i < 4; i++) {
+            navBadges[i].removeAllViews();
+            if (i == TAB_SESSIONS && ask > 0) navBadges[i].addView(ui.badge(ask));
+        }
     }
 
     private ScrollView page(LinearLayout body) {
@@ -235,46 +259,263 @@ public class MainActivity extends Activity {
         return sv;
     }
 
-    private LinearLayout header(String title, View trailing) {
+    private LinearLayout header(String title, View... trailing) {
         LinearLayout h = ui.hrow();
         h.setPadding(dp(4), dp(16), 0, dp(4));
         h.addView(ui.title(title), Ui.weight1());
-        if (trailing != null) h.addView(trailing);
+        for (View t : trailing) if (t != null) h.addView(t);
         return h;
     }
 
-    // ================= HOSTS =================
-    private View buildHostsPage() {
+    private List<SessionItem> allSessions() {
+        List<SessionItem> out = new ArrayList<>();
+        for (Host h : hosts) {
+            HStat st = stats.get(h.id);
+            out.addAll(SessionItem.merge(h, st != null ? st.sessions : null));
+        }
+        out.sort((a, b) -> a.rank() != b.rank() ? a.rank() - b.rank() : Long.compare(b.since, a.since));
+        return out;
+    }
+
+    // ================= HOME =================
+    private View buildHomePage() {
         LinearLayout body = ui.vcol();
         ImageView refresh = ui.iconButton(R.drawable.ic_refresh, ui.onSurfaceVariant);
         refresh.setContentDescription("Refresh");
-        refresh.setOnClickListener(v -> { pollHosts(); scanTailnet(); refreshBanners(); });
-        body.addView(header("S-remote", refresh));
-        TextView sub = ui.text("Your terminals, over your tailnet", 14, ui.onSurfaceVariant, false);
-        sub.setPadding(dp(4), 0, 0, dp(8));
-        body.addView(sub);
+        refresh.setOnClickListener(v -> { ui.haptic(v); pollHosts(); scanTailnet(); refreshBanners(); });
+        greeting = ui.text("", 14, ui.onSurfaceVariant, false);
+        greeting.setPadding(dp(4), dp(16), 0, 0);
+        body.addView(greeting);
+        LinearLayout h = header("S-remote", refresh);
+        h.setPadding(dp(4), 0, 0, dp(8));
+        body.addView(h);
+
+        homeStats = ui.hrow();
+        body.addView(homeStats);
 
         banners = ui.vcol();
+        banners.setPadding(0, dp(12), 0, 0);
         body.addView(banners);
 
-        body.addView(ui.label("Hosts"));
+        attention = ui.vcol();
+        body.addView(attention);
+
+        TextView addBtn = ui.textButton("Add");
+        addBtn.setOnClickListener(v -> Actions.hostEditor(this, null, x -> { reload(); pollHosts(); }));
+        body.addView(ui.section("Hosts", addBtn));
         hostList = ui.vcol();
         body.addView(hostList);
 
         LinearLayout ml = ui.hrow();
-        TextView mlt = ui.label("On your tailnet");
-        ml.addView(mlt, Ui.weight1());
+        ml.setPadding(dp(4), dp(20), 0, dp(8));
+        ml.addView(ui.text("On your tailnet", 15, ui.onSurface, true), Ui.weight1());
         machinesStatus = ui.text("", 12, ui.onSurfaceVariant, false);
-        machinesStatus.setPadding(0, dp(12), dp(4), 0);
+        machinesStatus.setPadding(0, 0, dp(4), 0);
         ml.addView(machinesStatus);
+        ImageView exp = ui.icon(R.drawable.ic_expand, ui.onSurfaceVariant, 22);
+        ml.addView(exp);
+        ml.setOnClickListener(v -> { machinesOpen = !machinesOpen; exp.setRotation(machinesOpen ? 0 : -90); renderMachines(); });
         body.addView(ml);
         machineList = ui.vcol();
         body.addView(machineList);
         return page(body);
     }
 
+    private static String greetingText() {
+        int h = Calendar.getInstance().get(Calendar.HOUR_OF_DAY);
+        if (h < 5) return "Working late";
+        if (h < 12) return "Good morning";
+        if (h < 18) return "Good afternoon";
+        return "Good evening";
+    }
+
+    private void renderHome() {
+        if (hostList == null) return;
+        greeting.setText(greetingText());
+        List<SessionItem> all = allSessions();
+
+        // stat tiles
+        int online = 0, run = 0, ask = 0, doneToday = 0;
+        for (Host h : hosts) {
+            HStat st = stats.get(h.id);
+            if ((st != null && st.online) || Boolean.TRUE.equals(StateBus.isConnected(h.id))) online++;
+        }
+        for (SessionItem s : all) {
+            if (s.state == Detector.State.RUNNING) run++;
+            else if (s.state == Detector.State.QUESTION) ask++;
+        }
+        String today = dayLabel(System.currentTimeMillis());
+        for (JSONObject e : EventLog.list(this))
+            if (EventLog.K_DONE.equals(e.optString("kind")) && today.equals(dayLabel(e.optLong("t")))) doneToday++;
+        homeStats.removeAllViews();
+        boolean mon = StateBus.monitorRunning;
+        addStat(online + "/" + hosts.size(), "Online", ui.onPrimaryContainer, ui.primaryContainer, v -> {});
+        addStat(mon ? String.valueOf(run) : "–", "Running", ui.onSecondaryContainer, ui.secondaryContainer, v -> { sessFilter = "running"; selectTab(TAB_SESSIONS); });
+        addStat(mon ? String.valueOf(ask) : "–", "Need you", ask > 0 ? ui.warn : ui.onSurfaceVariant, ask > 0 ? ui.warnContainer : ui.containerHigh,
+                v -> { sessFilter = "question"; selectTab(TAB_SESSIONS); });
+        addStat(String.valueOf(doneToday), "Done today", ui.ok, ui.okContainer, v -> { activityFilter = EventLog.K_DONE; selectTab(TAB_ACTIVITY); });
+
+        // needs you: questions first, then recently finished
+        attention.removeAllViews();
+        List<SessionItem> asks = new ArrayList<>(), dones = new ArrayList<>();
+        long now = System.currentTimeMillis();
+        for (SessionItem s : all) {
+            if (s.state == Detector.State.QUESTION) asks.add(s);
+            else if (s.state == Detector.State.DONE && now - s.since < RECENT_DONE_MS) dones.add(s);
+        }
+        if (!asks.isEmpty() || !dones.isEmpty()) {
+            attention.addView(ui.section("Needs you", null));
+            for (SessionItem s : asks) attention.addView(questionCard(s));
+            for (SessionItem s : dones) attention.addView(doneRow(s));
+        }
+
+        // hosts
+        hostList.removeAllViews();
+        if (hosts.isEmpty()) {
+            LinearLayout e = ui.emptyState(R.drawable.ic_hosts, "No hosts yet",
+                    "Tap “Add host” and enter a machine's Tailscale IP, e.g. 100.64.1.2 — or pick one from your tailnet below.");
+            hostList.addView(e);
+        }
+        Map<String, List<SessionItem>> byHost = new HashMap<>();
+        for (SessionItem s : all) byHost.computeIfAbsent(s.host.id, k -> new ArrayList<>()).add(s);
+        for (Host h : hosts) hostList.addView(hostCard(h, byHost.getOrDefault(h.id, new ArrayList<>())));
+        renderMachines();
+    }
+
+    private void addStat(String num, String label, int fg, int bg, View.OnClickListener l) {
+        LinearLayout t = ui.statTile(num, label, fg, bg);
+        t.setOnClickListener(l);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        lp.setMargins(homeStats.getChildCount() == 0 ? 0 : dp(8), 0, 0, 0);
+        homeStats.addView(t, lp);
+    }
+
+    /** a waiting session: the question + one-tap answers */
+    private View questionCard(SessionItem s) {
+        LinearLayout c = ui.card(ui.warnContainer);
+        c.setBackground(ui.ripple(ui.round(ui.warnContainer, 24), 24));
+        LinearLayout top = ui.hrow();
+        top.addView(ui.icon(R.drawable.ic_help, ui.warn, 22));
+        TextView t = ui.oneLine(ui.text(s.name + "  ·  " + s.host.name, 15, ui.onSurface, true));
+        t.setPadding(dp(10), 0, 0, 0);
+        top.addView(t, Ui.weight1());
+        top.addView(ui.text(Ui.ago(s.since), 12, ui.onSurfaceVariant, false));
+        c.addView(top);
+        if (s.question != null) {
+            TextView q = ui.text(s.question, 13, ui.onSurface, false);
+            q.setTypeface(android.graphics.Typeface.MONOSPACE);
+            q.setMaxLines(4);
+            q.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            q.setPadding(dp(12), dp(10), dp(12), dp(10));
+            q.setBackground(ui.round(ui.surface, 14));
+            LinearLayout.LayoutParams qlp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            qlp.setMargins(0, dp(10), 0, 0);
+            c.addView(q, qlp);
+        }
+        LinearLayout row = ui.hrow();
+        row.setPadding(0, dp(10), 0, 0);
+        for (Detector.Answer a : Detector.answersFor(s.question)) {
+            TextView b = ui.filledButton(a.label);
+            b.setOnClickListener(v -> {
+                ui.haptic(v);
+                Api.input(this, s.host, s.id, a.data);
+                Notify.cancel(this, s.host, "q:" + s.id);
+                toast("Sent to " + s.name);
+            });
+            row.addView(b, ui.margins(0, 0, 8, 0));
+        }
+        TextView reply = ui.tonalButton("Reply…");
+        reply.setOnClickListener(v -> SessionSheet.show(this, s));
+        row.addView(reply);
+        HorizontalScrollView hs = new HorizontalScrollView(this);
+        hs.setHorizontalScrollBarEnabled(false);
+        hs.addView(row);
+        c.addView(hs);
+        c.setOnClickListener(v -> SessionSheet.show(this, s));
+        return c;
+    }
+
+    private View doneRow(SessionItem s) {
+        TextView open = ui.textButton("View");
+        open.setOnClickListener(v -> SessionSheet.show(this, s));
+        LinearLayout r = ui.listRow(R.drawable.ic_check, ui.ok, ui.okContainer,
+                s.name + " finished", s.host.name + " · " + Ui.ago(s.since) + (s.line.isEmpty() ? "" : " · " + s.line), open);
+        r.setBackground(ui.ripple(ui.round(ui.container, 20), 20));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.setMargins(0, 0, 0, dp(8));
+        r.setLayoutParams(lp);
+        r.setOnClickListener(v -> SessionSheet.show(this, s));
+        return r;
+    }
+
+    private View hostCard(Host h, List<SessionItem> ss) {
+        LinearLayout card = ui.card(ui.container);
+        card.setOnClickListener(v -> Actions.openDetail(this, h));
+        card.setOnLongClickListener(v -> { ui.haptic(v); Actions.hostMenu(this, h, this::reload); return true; });
+
+        HStat st = stats.get(h.id);
+        Boolean wsUp = StateBus.isConnected(h.id);
+        boolean online = st != null ? st.online : Boolean.TRUE.equals(wsUp);
+
+        LinearLayout top = ui.hrow();
+        top.addView(ui.hostAvatar(h, 44));
+        LinearLayout tc = ui.vcol();
+        tc.setPadding(dp(14), 0, dp(8), 0);
+        tc.addView(ui.oneLine(ui.text(h.name, 17, ui.onSurface, true)));
+        String sub = h.hostPort() + (st != null && !st.platform.isEmpty() ? " · " + st.platform : "");
+        tc.addView(ui.oneLine(ui.text(sub, 13, ui.onSurfaceVariant, false)));
+        top.addView(tc, Ui.weight1());
+        if (st == null && wsUp == null) top.addView(ui.pill("Checking…", ui.onSurfaceVariant, ui.containerHigh));
+        else if (online) top.addView(ui.pill(st != null && st.ms > 0 ? st.ms + " ms" : "Online", ui.ok, ui.okContainer));
+        else top.addView(ui.pill("Offline", ui.err, ui.errContainer));
+        ImageView term = ui.iconButton(R.drawable.ic_terminal, ui.primary);
+        term.setContentDescription("Open terminal");
+        term.setOnClickListener(v -> Actions.openTerminal(this, h, null));
+        top.addView(term);
+        card.addView(top);
+
+        List<SessionItem> live = new ArrayList<>();
+        for (SessionItem s : ss) if (!s.exited) live.add(s);
+        LinearLayout chips = ui.hrow();
+        chips.setPadding(0, dp(10), 0, 0);
+        int run = 0, ask = 0, done = 0, idle = 0;
+        boolean anyLive = false;
+        for (SessionItem s : live) {
+            anyLive |= s.live;
+            switch (s.state) {
+                case RUNNING: run++; break;
+                case QUESTION: ask++; break;
+                case DONE: done++; break;
+                default: idle++;
+            }
+        }
+        if (anyLive) {
+            if (ask > 0) chips.addView(ui.pill(ask + " needs input", ui.warn, ui.warnContainer), ui.margins(0, 0, 6, 0));
+            if (run > 0) chips.addView(ui.pill(run + " running", ui.onPrimaryContainer, ui.primaryContainer), ui.margins(0, 0, 6, 0));
+            if (done > 0) chips.addView(ui.pill(done + " done", ui.ok, ui.okContainer), ui.margins(0, 0, 6, 0));
+            if (idle > 0) chips.addView(ui.pill(idle + " idle", ui.onSurfaceVariant, ui.containerHigh), ui.margins(0, 0, 6, 0));
+        } else if (!live.isEmpty()) {
+            chips.addView(ui.pill(live.size() + " live session" + (live.size() == 1 ? "" : "s"), ui.onSurfaceVariant, ui.containerHigh), ui.margins(0, 0, 6, 0));
+        }
+        if (!h.notify) chips.addView(ui.pill("Muted", ui.onSurfaceVariant, ui.containerHigh));
+        if (chips.getChildCount() > 0) card.addView(chips);
+
+        int shown = 0;
+        for (SessionItem s : live) {
+            if (shown++ >= 3) break;
+            card.addView(Actions.sessionRow(this, ui, s, false, this::pollHosts));
+        }
+        if (live.size() > 3) {
+            TextView more = ui.text("+" + (live.size() - 3) + " more · open host", 13, ui.primary, true);
+            more.setPadding(dp(14), dp(8), 0, 0);
+            card.addView(more);
+        }
+        return card;
+    }
+
     /** Tailscale + monitoring banners */
     private void refreshBanners() {
+        if (banners == null) return;
         banners.removeAllViews();
         if (!Tailscale.installed(this)) {
             banners.addView(banner(R.drawable.ic_shield, ui.err, ui.errContainer, "Tailscale not installed",
@@ -291,7 +532,7 @@ public class MainActivity extends Activity {
             banners.addView(banner(R.drawable.ic_bell, ui.onTertiaryContainer, ui.tertiaryContainer,
                     "Get alerted when work is done",
                     "Turn on monitoring to see live session states and get notified when a task finishes or needs your input.",
-                    "Turn on", v -> { setMonitor(true); refreshBanners(); renderHosts(); }));
+                    "Turn on", v -> { setMonitor(true); refreshBanners(); renderHome(); }));
         }
     }
 
@@ -307,9 +548,11 @@ public class MainActivity extends Activity {
         TextView t = ui.text(text, 14, ui.onSurfaceVariant, false);
         t.setPadding(0, dp(4), 0, dp(10));
         tc.addView(t);
+        LinearLayout br = ui.hrow();
         TextView b = ui.filledButton(action);
         b.setOnClickListener(l);
-        tc.addView(b, ui.margins(0, 0, 0, 0));
+        br.addView(b);
+        tc.addView(br);
         r.addView(tc, Ui.weight1());
         c.addView(r);
         return c;
@@ -318,197 +561,45 @@ public class MainActivity extends Activity {
     private void reload() {
         hosts.clear();
         hosts.addAll(store.list());
-        renderHosts();
-        updateShortcuts();
+        stats.keySet().retainAll(idsOf(hosts));
+        renderCurrent();
+        Actions.updateShortcuts(this);
     }
 
-    private void renderHosts() {
-        if (hostList == null) return;
-        hostList.removeAllViews();
-        if (hosts.isEmpty()) {
-            LinearLayout e = ui.card(ui.container);
-            e.setBackground(ui.round(ui.container, 24));
-            e.setGravity(Gravity.CENTER_HORIZONTAL);
-            e.setPadding(dp(24), dp(28), dp(24), dp(28));
-            e.addView(ui.icon(R.drawable.ic_hosts, ui.primary, 40));
-            TextView t = ui.text("No hosts yet", 18, ui.onSurface, false);
-            t.setPadding(0, dp(12), 0, dp(4));
-            e.addView(t);
-            TextView s = ui.text("Tap “Add host” and enter a machine's Tailscale IP, e.g. 100.64.1.2 — or pick one from your tailnet below.",
-                    14, ui.onSurfaceVariant, false);
-            s.setGravity(Gravity.CENTER);
-            e.addView(s);
-            hostList.addView(e);
-        }
-        for (Host h : hosts) hostList.addView(hostCard(h));
-        renderMachines();
-    }
-
-    private View hostCard(Host h) {
-        LinearLayout card = ui.card(ui.container);
-        card.setOnClickListener(v -> openHost(h));
-        card.setOnLongClickListener(v -> { hostMenu(h); return true; });
-
-        HStat st = stats.get(h.id);
-        Boolean wsUp = StateBus.isConnected(h.id);
-        boolean online = st != null ? st.online : wsUp != null && wsUp;
-
-        LinearLayout top = ui.hrow();
-        top.addView(ui.avatar(h.name, ui.primaryContainer, ui.onPrimaryContainer));
-        LinearLayout tc = ui.vcol();
-        tc.setPadding(dp(14), 0, dp(8), 0);
-        tc.addView(ui.oneLine(ui.text(h.name, 17, ui.onSurface, true)));
-        tc.addView(ui.oneLine(ui.text(h.hostPort(), 13, ui.onSurfaceVariant, false)));
-        top.addView(tc, Ui.weight1());
-        if (st == null && wsUp == null) top.addView(ui.pill("Checking…", ui.onSurfaceVariant, ui.containerHigh));
-        else if (online) top.addView(ui.pill(st != null && st.ms > 0 ? st.ms + " ms" : "Online", ui.ok, ui.okContainer));
-        else top.addView(ui.pill("Offline", ui.err, ui.errContainer));
-        card.addView(top);
-
-        // session states: live from the monitor, else just counts from /api/sessions
-        List<StateBus.Sess> ss = new ArrayList<>();
-        for (StateBus.Sess s : StateBus.sessions(h.id)) if (s.state != Detector.State.EXITED) ss.add(s);
-        ss.sort((a, b) -> rank(a.state) - rank(b.state));
-        LinearLayout chips = ui.hrow();
-        chips.setPadding(0, dp(12), 0, 0);
-        if (!ss.isEmpty()) {
-            int run = 0, ask = 0, done = 0, idle = 0;
-            for (StateBus.Sess s : ss) switch (s.state) {
-                case RUNNING: run++; break;
-                case QUESTION: ask++; break;
-                case DONE: done++; break;
-                default: idle++;
-            }
-            if (ask > 0) chips.addView(ui.pill(ask + " needs input", ui.warn, ui.warnContainer), ui.margins(0, 0, 6, 0));
-            if (run > 0) chips.addView(ui.pill(run + " running", ui.onPrimaryContainer, ui.primaryContainer), ui.margins(0, 0, 6, 0));
-            if (done > 0) chips.addView(ui.pill(done + " done", ui.ok, ui.okContainer), ui.margins(0, 0, 6, 0));
-            if (idle > 0) chips.addView(ui.pill(idle + " idle", ui.onSurfaceVariant, ui.containerHigh), ui.margins(0, 0, 6, 0));
-        } else if (st != null && st.total >= 0) {
-            chips.addView(ui.pill(st.live + " live session" + (st.live == 1 ? "" : "s"), ui.onSurfaceVariant, ui.containerHigh), ui.margins(0, 0, 6, 0));
-        }
-        if (!h.notify) chips.addView(ui.pill("Muted", ui.onSurfaceVariant, ui.containerHigh));
-        if (chips.getChildCount() > 0) card.addView(chips);
-
-        int shown = 0;
-        for (StateBus.Sess s : ss) {
-            if (shown++ >= 4) break;
-            card.addView(sessionRow(h, s));
-        }
-        if (ss.size() > 4) {
-            TextView more = ui.text("+" + (ss.size() - 4) + " more", 13, ui.onSurfaceVariant, false);
-            more.setPadding(dp(18), dp(6), 0, 0);
-            card.addView(more);
-        }
-        return card;
-    }
-
-    private static int rank(Detector.State s) {
-        switch (s) {
-            case QUESTION: return 0;
-            case RUNNING: return 1;
-            case DONE: return 2;
-            default: return 3;
-        }
-    }
-
-    private View sessionRow(Host h, StateBus.Sess s) {
-        LinearLayout r = ui.hrow();
-        r.setPadding(dp(10), dp(8), dp(10), dp(8));
-        r.setBackground(ui.ripple(ui.round(ui.surface, 14), 14));
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.setMargins(0, dp(8), 0, 0);
-        r.setLayoutParams(lp);
-        r.addView(ui.dot(ui.stateColor(s.state), 9));
-        LinearLayout tc = ui.vcol();
-        tc.setPadding(dp(12), 0, dp(6), 0);
-        LinearLayout nl = ui.hrow();
-        nl.addView(ui.oneLine(ui.text(s.name, 14, ui.onSurface, true)), new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0));
-        TextView sl = ui.text("  ·  " + Ui.stateLabel(s.state) + " · " + Ui.ago(s.since), 12, ui.stateColor(s.state), false);
-        nl.addView(ui.oneLine(sl));
-        tc.addView(nl);
-        String line = s.state == Detector.State.QUESTION && s.question != null
-                ? s.question.replace('\n', ' ') : s.line;
-        if (line != null && !line.isEmpty()) tc.addView(ui.mono(line, 12, ui.onSurfaceVariant));
-        r.addView(tc, Ui.weight1());
-        if (s.state == Detector.State.QUESTION) {
-            TextView ans = ui.tonalButton("Answer");
-            ans.setOnClickListener(v -> answerDialog(h, s));
-            r.addView(ans);
-            r.setOnClickListener(v -> answerDialog(h, s));
-        } else {
-            r.setOnClickListener(v -> openHost(h));
-        }
-        return r;
-    }
-
-    /** answer a waiting session without opening the terminal */
-    private void answerDialog(Host h, StateBus.Sess s) {
-        LinearLayout box = ui.vcol();
-        box.setPadding(dp(24), dp(8), dp(24), 0);
-        TextView q = ui.text(s.question != null ? s.question : s.line, 14, ui.onSurface, false);
-        q.setTypeface(android.graphics.Typeface.MONOSPACE);
-        q.setPadding(dp(12), dp(10), dp(12), dp(10));
-        q.setBackground(ui.round(ui.containerHigh, 12));
-        box.addView(q);
-        AlertDialog[] ref = new AlertDialog[1];
-        List<Detector.Answer> answers = Detector.answersFor(s.question);
-        if (!answers.isEmpty()) {
-            LinearLayout row = ui.hrow();
-            row.setPadding(0, dp(12), 0, 0);
-            for (Detector.Answer a : answers) {
-                TextView b = ui.tonalButton(a.label);
-                b.setOnClickListener(v -> { send(h, s, a.data); if (ref[0] != null) ref[0].dismiss(); });
-                row.addView(b, ui.margins(0, 0, 8, 0));
-            }
-            box.addView(row);
-        }
-        EditText in = new EditText(this);
-        in.setHint("Type a reply…");
-        in.setSingleLine(true);
-        in.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
-        box.addView(in);
-        ref[0] = new AlertDialog.Builder(this, ui.dialogTheme())
-                .setTitle(s.name + " · " + h.name)
-                .setView(box)
-                .setPositiveButton("Send", (d, w) -> send(h, s, in.getText().toString() + "\r"))
-                .setNeutralButton("Open terminal", (d, w) -> openHost(h))
-                .setNegativeButton("Cancel", null)
-                .show();
-    }
-
-    private void send(Host h, StateBus.Sess s, String data) {
-        MonitorService.sendInput(this, h.id, s.id, data);
-        Notify.cancel(this, h, "q:" + s.id);
-        toast("Sent to " + s.name);
+    private static List<String> idsOf(List<Host> hs) {
+        List<String> l = new ArrayList<>();
+        for (Host h : hs) l.add(h.id);
+        return l;
     }
 
     // ---------- liveness polling ----------
     private void pollHosts() {
         for (Host h : new ArrayList<>(hosts)) {
-            pool.execute(() -> {
+            Api.info(h, (info, e) -> {
                 HStat st = new HStat();
-                long t0 = System.nanoTime();
-                try (Response r = http.newCall(new Request.Builder().url(h.url + "/api/info").build()).execute()) {
-                    st.online = r.isSuccessful();
-                    st.ms = (System.nanoTime() - t0) / 1_000_000;
-                } catch (Exception ignored) {}
+                st.online = info != null && info.online;
                 if (st.online) {
-                    try (Response r = http.newCall(new Request.Builder().url(h.url + "/api/sessions").build()).execute()) {
-                        if (r.isSuccessful() && r.body() != null) {
-                            JSONArray a = new JSONArray(r.body().string());
-                            st.total = a.length(); st.live = 0;
-                            for (int i = 0; i < a.length(); i++)
-                                if (!a.getJSONObject(i).optBoolean("exited")) st.live++;
-                        }
-                    } catch (Exception ignored) {}
+                    st.ms = info.ms;
+                    st.platform = platformLabel(info.info.optString("platform"));
+                    HStat prev = stats.get(h.id);
+                    st.sessions = prev != null ? prev.sessions : null;
+                    Api.sessions(h, (a, e2) -> {
+                        st.sessions = a;
+                        if (resumed) onBus.run();
+                    });
                 }
-                main.post(() -> {
-                    stats.put(h.id, st);
-                    if (tab == TAB_HOSTS) renderHosts();
-                });
+                stats.put(h.id, st);
+                if (resumed) onBus.run();
             });
+        }
+    }
+
+    private static String platformLabel(String p) {
+        switch (p) {
+            case "win32": return "Windows";
+            case "darwin": return "macOS";
+            case "linux": return "Linux";
+            default: return p;
         }
     }
 
@@ -516,11 +607,10 @@ public class MainActivity extends Activity {
     private void renderMachines() {
         if (machineList == null) return;
         machineList.removeAllViews();
+        if (!machinesOpen) return;
         if (machines.isEmpty()) {
-            TextView t = ui.text(hosts.isEmpty() ? "Add a host first — machines are discovered through it."
-                    : scanning ? "Scanning…" : "No other machines online.", 14, ui.onSurfaceVariant, false);
-            t.setPadding(dp(4), 0, 0, 0);
-            machineList.addView(t);
+            machineList.addView(Actions.hint(ui, hosts.isEmpty() ? "Add a host first — machines are discovered through it."
+                    : scanning ? "Scanning…" : "No other machines online."));
             return;
         }
         for (JSONObject p : machines) {
@@ -530,19 +620,15 @@ public class MainActivity extends Activity {
             String os = p.optString("os");
             boolean agent = !p.isNull("sremote");
             Host known = findHostByIp(ip);
-            LinearLayout r = ui.card(ui.container);
-            r.setPadding(dp(16), dp(12), dp(12), dp(12));
-            LinearLayout row = ui.hrow();
-            row.addView(ui.icon(R.drawable.ic_hosts, agent ? ui.primary : ui.outline, 22));
-            LinearLayout tc = ui.vcol();
-            tc.setPadding(dp(14), 0, dp(8), 0);
-            tc.addView(ui.oneLine(ui.text(nm, 15, ui.onSurface, true)));
-            tc.addView(ui.oneLine(ui.text(ip + (os.isEmpty() ? "" : " · " + os), 12, ui.onSurfaceVariant, false)));
-            row.addView(tc, Ui.weight1());
-            if (known != null) row.addView(ui.pill("Saved", ui.onSurfaceVariant, ui.containerHigh));
-            else if (agent) row.addView(ui.pill("S-remote", ui.onPrimaryContainer, ui.primaryContainer));
-            else row.addView(ui.pill("No agent", ui.onSurfaceVariant, ui.containerHigh));
-            r.addView(row);
+            View pill = known != null ? ui.pill("Saved", ui.onSurfaceVariant, ui.containerHigh)
+                    : agent ? ui.pill("S-remote", ui.onPrimaryContainer, ui.primaryContainer)
+                    : ui.pill("No agent", ui.onSurfaceVariant, ui.containerHigh);
+            LinearLayout r = ui.listRow(R.drawable.ic_hosts, agent ? ui.onPrimaryContainer : ui.onSurfaceVariant,
+                    agent ? ui.primaryContainer : ui.containerHigh, nm, ip + (os.isEmpty() ? "" : " · " + os), pill);
+            r.setBackground(ui.ripple(ui.round(ui.container, 20), 20));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.setMargins(0, 0, 0, dp(8));
+            r.setLayoutParams(lp);
             if (!agent && known == null) r.setAlpha(0.7f);
             final String fnm = nm;
             r.setOnClickListener(v -> machineTap(p, fnm, known));
@@ -551,25 +637,26 @@ public class MainActivity extends Activity {
     }
 
     private Host findHostByIp(String ip) {
-        for (Host h : hosts) if (h.url.contains(ip)) return h;
+        for (Host h : hosts) if (h.url.contains("//" + ip + ":") || h.url.endsWith("//" + ip)) return h;
         return null;
     }
 
     private void machineTap(JSONObject p, String nm, Host known) {
-        if (known != null) { openHost(known); return; }
+        if (known != null) { Actions.openDetail(this, known); return; }
         String ip = p.optString("ip");
         if (p.isNull("sremote")) {
             new AlertDialog.Builder(this, ui.dialogTheme())
                     .setTitle(nm)
-                    .setMessage("Online, but no S-remote server answers on :2209.\nAdd it anyway?")
-                    .setPositiveButton("Add anyway", (d, w) -> { store.add(nm, "http://" + ip + ":2209"); reload(); resyncMonitor(); })
+                    .setMessage("Online, but no S-remote server answers on :2209.\n\nInstall it on that machine with:\nirm https://raw.githubusercontent.com/thsangyk-oss/sremote/main/install.ps1 | iex\n\nAdd it anyway?")
+                    .setPositiveButton("Add anyway", (d, w) -> { store.add(nm, "http://" + ip + ":2209"); reload(); Actions.resyncMonitor(this); })
+                    .setNeutralButton("Copy command", (d, w) -> copy("irm https://raw.githubusercontent.com/thsangyk-oss/sremote/main/install.ps1 | iex"))
                     .setNegativeButton("Cancel", null).show();
             return;
         }
         Host h = store.add(nm, "http://" + ip + ":2209");
-        reload(); resyncMonitor();
+        reload(); Actions.resyncMonitor(this); pollHosts();
         toast("Added " + nm);
-        openHost(h);
+        Actions.openDetail(this, h);
     }
 
     private void scanTailnet() {
@@ -578,33 +665,130 @@ public class MainActivity extends Activity {
         scanning = true;
         lastScan = System.currentTimeMillis();
         machinesStatus.setText("scanning…");
-        List<Host> hs = new ArrayList<>(hosts);
-        pool.execute(() -> {
-            Map<String, JSONObject> found = new LinkedHashMap<>();
-            for (Host h : hs) {
-                try (Response r = http.newCall(new Request.Builder().url(h.url + "/api/peers").build()).execute()) {
-                    if (!r.isSuccessful() || r.body() == null) continue;
-                    JSONArray peers = new JSONObject(r.body().string()).optJSONArray("peers");
-                    if (peers == null) continue;
-                    for (int i = 0; i < peers.length(); i++) {
-                        JSONObject p = peers.optJSONObject(i);
-                        if (p == null || !p.optBoolean("online")) continue;
-                        String ip = p.optString("ip");
-                        if (ip.isEmpty()) continue;
-                        JSONObject prev = found.get(ip);
-                        if (prev == null || (prev.isNull("sremote") && !p.isNull("sremote")))
-                            found.put(ip, p); // prefer the entry that saw an agent
-                    }
-                } catch (Exception ignored) {}
-            }
-            List<JSONObject> out = new ArrayList<>(found.values());
-            main.post(() -> {
-                machines.clear(); machines.addAll(out);
+        Map<String, JSONObject> found = new LinkedHashMap<>();
+        int[] left = {hosts.size()};
+        for (Host h : new ArrayList<>(hosts)) {
+            Api.peers(h, (peers, e) -> {
+                if (peers != null) for (int i = 0; i < peers.length(); i++) {
+                    JSONObject p = peers.optJSONObject(i);
+                    if (p == null || !p.optBoolean("online")) continue;
+                    String ip = p.optString("ip");
+                    if (ip.isEmpty()) continue;
+                    JSONObject prev = found.get(ip);
+                    if (prev == null || (prev.isNull("sremote") && !p.isNull("sremote")))
+                        found.put(ip, p); // prefer the entry that saw an agent
+                }
+                if (--left[0] > 0) return;
+                machines.clear(); machines.addAll(found.values());
                 scanning = false;
-                machinesStatus.setText(out.isEmpty() ? "" : out.size() + " online");
+                machinesStatus.setText(machines.isEmpty() ? "" : machines.size() + " online");
                 renderMachines();
             });
+        }
+    }
+
+    // ================= SESSIONS =================
+    private View buildSessionsPage() {
+        LinearLayout body = ui.vcol();
+        TextView newS = ui.textButton("New");
+        newS.setOnClickListener(v -> pickHost("New session on…", h -> Actions.newSession(this, h, null)));
+        body.addView(header("Sessions", newS));
+        TextView sub = ui.text("Every terminal on every host", 14, ui.onSurfaceVariant, false);
+        sub.setPadding(dp(4), 0, 0, dp(12));
+        body.addView(sub);
+
+        EditText[] ref = new EditText[1];
+        body.addView(ui.searchField("Search sessions, hosts, output…", ref));
+        ref[0].addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int a, int b, int c) {}
+            @Override public void onTextChanged(CharSequence s, int a, int b, int c) {}
+            @Override public void afterTextChanged(Editable e) { sessQuery = e.toString().trim(); renderSessions(); }
         });
+
+        HorizontalScrollView hs = new HorizontalScrollView(this);
+        hs.setHorizontalScrollBarEnabled(false);
+        sessChips = ui.hrow();
+        sessChips.setPadding(0, dp(12), 0, 0);
+        hs.addView(sessChips);
+        body.addView(hs);
+        sessList = ui.vcol();
+        sessList.setPadding(0, dp(8), 0, 0);
+        body.addView(sessList);
+        return page(body);
+    }
+
+    private boolean sessMatch(SessionItem s) {
+        switch (sessFilter) {
+            case "question": return s.state == Detector.State.QUESTION;
+            case "running": return s.state == Detector.State.RUNNING;
+            case "done": return s.state == Detector.State.DONE;
+            case "idle": return s.state == Detector.State.IDLE && !s.exited;
+            case "exited": return s.exited;
+            default: return true;
+        }
+    }
+
+    private void renderSessions() {
+        if (sessList == null) return;
+        List<SessionItem> all = allSessions();
+        String[][] filters = {{"all", "All"}, {"question", "Needs input"}, {"running", "Running"},
+                {"done", "Done"}, {"idle", "Idle"}, {"exited", "Exited"}};
+        sessChips.removeAllViews();
+        String saved = sessFilter;
+        for (String[] f : filters) {
+            sessFilter = f[0];
+            int n = 0;
+            for (SessionItem s : all) if (sessMatch(s)) n++;
+            sessFilter = saved;
+            if (n == 0 && !f[0].equals("all") && !f[0].equals(saved)) continue;
+            TextView c = ui.chip(f[1] + (n > 0 ? "  " + n : ""), f[0].equals(saved));
+            c.setOnClickListener(v -> { sessFilter = f[0]; renderSessions(); });
+            sessChips.addView(c, ui.margins(0, 0, 8, 0));
+        }
+        sessList.removeAllViews();
+        if (!StateBus.monitorRunning && !hosts.isEmpty()) {
+            LinearLayout b = ui.listRow(R.drawable.ic_bell, ui.onTertiaryContainer, ui.tertiaryContainer,
+                    "Live states are off", "Turn on monitoring to see running / needs input / done", null);
+            b.setBackground(ui.ripple(ui.round(ui.tertiaryContainer, 20), 20));
+            b.setOnClickListener(v -> { setMonitor(true); renderSessions(); });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.setMargins(0, 0, 0, dp(8));
+            sessList.addView(b, lp);
+        }
+        int n = 0;
+        for (Host h : hosts) {
+            List<SessionItem> mine = new ArrayList<>();
+            for (SessionItem s : all) if (s.host.id.equals(h.id) && sessMatch(s) && s.matches(sessQuery)) mine.add(s);
+            if (mine.isEmpty()) continue;
+            LinearLayout hh = ui.hrow();
+            hh.setPadding(dp(4), dp(n == 0 ? 6 : 18), 0, dp(2));
+            hh.addView(ui.hostAvatar(h, 24));
+            TextView t = ui.oneLine(ui.text(h.name, 14, ui.onSurface, true));
+            t.setPadding(dp(10), 0, 0, 0);
+            hh.addView(t, Ui.weight1());
+            hh.addView(ui.text(mine.size() + "", 13, ui.onSurfaceVariant, false));
+            hh.setOnClickListener(v -> Actions.openDetail(this, h));
+            sessList.addView(hh);
+            for (SessionItem s : mine) sessList.addView(Actions.sessionRow(this, ui, s, false, this::pollHosts));
+            n += mine.size();
+        }
+        if (n == 0) {
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.setMargins(0, dp(8), 0, 0);
+            sessList.addView(ui.emptyState(R.drawable.ic_terminal,
+                    hosts.isEmpty() ? "No hosts yet" : !sessQuery.isEmpty() || !sessFilter.equals("all") ? "Nothing matches" : "No sessions",
+                    hosts.isEmpty() ? "Add a host on the Home tab." : !sessQuery.isEmpty() || !sessFilter.equals("all")
+                            ? "Try another filter or search." : "Tap “New” to start one."), lp);
+        }
+    }
+
+    private void pickHost(String title, java.util.function.Consumer<Host> pick) {
+        if (hosts.isEmpty()) { toast("Add a host first"); return; }
+        if (hosts.size() == 1) { pick.accept(hosts.get(0)); return; }
+        String[] labels = new String[hosts.size()];
+        int[] icons = new int[hosts.size()];
+        for (int i = 0; i < hosts.size(); i++) { labels[i] = hosts.get(i).name; icons[i] = R.drawable.ic_hosts; }
+        ui.menuSheet(this, title, labels, icons, i -> pick.accept(hosts.get(i))).show();
     }
 
     // ================= ACTIVITY =================
@@ -639,6 +823,18 @@ public class MainActivity extends Activity {
             c.setOnClickListener(v -> { activityFilter = f[0]; renderActivity(); });
             activityChips.addView(c, ui.margins(0, 0, 8, 0));
         }
+        if (hosts.size() > 1) {
+            View sep = new View(this);
+            sep.setBackgroundColor(ui.outlineVariant);
+            activityChips.addView(sep, new LinearLayout.LayoutParams(dp(1), dp(24)));
+            activityChips.addView(new View(this), new LinearLayout.LayoutParams(dp(8), 1));
+            for (Host h : hosts) {
+                boolean on = h.id.equals(activityHost);
+                TextView c = ui.chip(h.name, on);
+                c.setOnClickListener(v -> { activityHost = on ? null : h.id; renderActivity(); });
+                activityChips.addView(c, ui.margins(0, 0, 8, 0));
+            }
+        }
         activityList.removeAllViews();
         String lastDay = null;
         int n = 0;
@@ -647,6 +843,7 @@ public class MainActivity extends Activity {
             boolean match = activityFilter.equals("all") || activityFilter.equals(kind)
                     || (activityFilter.equals("sessions") && (kind.equals(EventLog.K_NEW) || kind.equals(EventLog.K_EXIT)));
             if (!match) continue;
+            if (activityHost != null && !activityHost.equals(e.optString("host"))) continue;
             long t = e.optLong("t");
             String day = dayLabel(t);
             if (!day.equals(lastDay)) {
@@ -656,22 +853,14 @@ public class MainActivity extends Activity {
                 lastDay = day;
             }
             activityList.addView(eventRow(e, kind, t));
-            n++;
+            if (++n >= 150) break;
         }
         if (n == 0) {
-            LinearLayout empty = ui.vcol();
-            empty.setGravity(Gravity.CENTER_HORIZONTAL);
-            empty.setPadding(dp(24), dp(48), dp(24), 0);
-            empty.addView(ui.icon(R.drawable.ic_bell, ui.outline, 48));
-            TextView t = ui.text("Nothing here yet", 18, ui.onSurface, false);
-            t.setPadding(0, dp(12), 0, dp(4));
-            empty.addView(t);
-            TextView s = ui.text(store.monitorEnabled()
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.setMargins(0, dp(8), 0, 0);
+            activityList.addView(ui.emptyState(R.drawable.ic_bell, "Nothing here yet", store.monitorEnabled()
                     ? "Finished tasks, questions and session changes will show up here."
-                    : "Turn on monitoring in Settings to start collecting activity.", 14, ui.onSurfaceVariant, false);
-            s.setGravity(Gravity.CENTER);
-            empty.addView(s);
-            activityList.addView(empty);
+                    : "Turn on monitoring in Settings to start collecting activity."), lp);
         }
     }
 
@@ -712,8 +901,20 @@ public class MainActivity extends Activity {
         tc.addView(meta);
         r.addView(tc, Ui.weight1());
         Host h = store.find(e.optString("host"));
-        if (h != null) r.setOnClickListener(v -> openHost(h));
+        String sid = e.optString("sid");
+        if (h != null) r.setOnClickListener(v -> {
+            SessionItem s = findSession(h, sid);
+            if (s != null && !s.exited) SessionSheet.show(this, s);
+            else Actions.openDetail(this, h);
+        });
         return r;
+    }
+
+    private SessionItem findSession(Host h, String sid) {
+        if (sid == null || sid.isEmpty()) return null;
+        HStat st = stats.get(h.id);
+        for (SessionItem s : SessionItem.merge(h, st != null ? st.sessions : null)) if (s.id.equals(sid)) return s;
+        return null;
     }
 
     private static String dayLabel(long t) {
@@ -730,7 +931,7 @@ public class MainActivity extends Activity {
     // ================= SETTINGS =================
     private View buildSettingsPage() {
         LinearLayout body = ui.vcol();
-        body.addView(header("Settings", null));
+        body.addView(header("Settings"));
         settingsBody = ui.vcol();
         body.addView(settingsBody);
         return page(body);
@@ -758,6 +959,8 @@ public class MainActivity extends Activity {
         return r;
     }
 
+    private static String hourLabel(int h) { return String.format(Locale.US, "%02d:00", h); }
+
     private void buildSettings() {
         if (settingsBody == null) return;
         settingsBody.removeAllViews();
@@ -781,6 +984,31 @@ public class MainActivity extends Activity {
         }));
         if (Build.VERSION.SDK_INT >= 33) g1.addView(clickRow("Add Quick Settings tile", "Toggle monitoring from the notification shade", v -> requestTile()));
         settingsBody.addView(g1);
+
+        settingsBody.addView(ui.label("Quiet hours"));
+        LinearLayout gq = group();
+        gq.addView(switchRow("Quiet hours", "Alerts arrive silently during this time",
+                store.quietOn(), (v, on) -> { store.setQuietOn(on); buildSettings(); }));
+        View range = clickRow("From " + hourLabel(store.quietFrom()) + " to " + hourLabel(store.quietTo()),
+                "Tap to change", v -> pickQuietRange());
+        View allowQ = switchRow("Questions still alert", "A waiting session blocks work — let those through",
+                store.quietAllowQuestions(), (v, on) -> store.setQuietAllowQuestions(on));
+        for (View v : new View[]{range, allowQ}) { v.setAlpha(store.quietOn() ? 1f : 0.5f); gq.addView(v); }
+        settingsBody.addView(gq);
+
+        settingsBody.addView(ui.label("Appearance & terminal"));
+        LinearLayout ga = group();
+        String th = store.theme();
+        ga.addView(clickRow("Theme", th.equals(HostStore.THEME_DARK) ? "Dark" : th.equals(HostStore.THEME_LIGHT) ? "Light" : "Follow system",
+                v -> ui.menuSheet(this, "Theme", new String[]{"Follow system", "Light", "Dark"},
+                        new int[]{R.drawable.ic_palette, R.drawable.ic_palette, R.drawable.ic_moon}, i -> {
+                            store.setTheme(i == 0 ? HostStore.THEME_SYSTEM : i == 1 ? HostStore.THEME_LIGHT : HostStore.THEME_DARK);
+                            recreate();
+                        }).show()));
+        ga.addView(switchRow("Keep screen on in terminal", "Handy while watching a long build",
+                store.keepScreenOn(), (v, on) -> store.setKeepScreenOn(on)));
+        ga.addView(clickRow("Quick commands", store.snippets().size() + " saved · shown in session previews", v -> editSnippets()));
+        settingsBody.addView(ga);
 
         settingsBody.addView(ui.label("Security"));
         LinearLayout g2 = group();
@@ -810,16 +1038,121 @@ public class MainActivity extends Activity {
         g3.addView(ui.settingRow("Tailscale", tsSub, tsBtn));
         settingsBody.addView(g3);
 
+        settingsBody.addView(ui.label("Backup"));
+        LinearLayout gb = group();
+        gb.addView(clickRow("Export hosts", "Copy hosts + quick commands as JSON (share or paste on another phone)", v -> exportHosts()));
+        gb.addView(clickRow("Import hosts", "Paste a JSON export — existing hosts are kept", v -> importHosts()));
+        settingsBody.addView(gb);
+
         settingsBody.addView(ui.label("About"));
         LinearLayout g4 = group();
         String ver = "?";
         try { ver = getPackageManager().getPackageInfo(getPackageName(), 0).versionName; } catch (Exception ignored) {}
         g4.addView(ui.settingRow("S-remote for Android", "Version " + ver, null));
+        g4.addView(clickRow("Welcome tour", "Tailscale, first host and notifications — step by step",
+                v -> startActivity(new Intent(this, OnboardingActivity.class))));
         g4.addView(clickRow("Project on GitHub", "thsangyk-oss/sremote", v -> {
             try { startActivity(new Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://github.com/thsangyk-oss/sremote"))); }
             catch (Exception ignored) {}
         }));
         settingsBody.addView(g4);
+    }
+
+    private void pickQuietRange() {
+        new TimePickerDialog(this, ui.dialogTheme(), (v1, h1, m1) ->
+                new TimePickerDialog(this, ui.dialogTheme(), (v2, h2, m2) -> {
+                    store.setQuietRange(h1, h2);
+                    buildSettings();
+                }, store.quietTo(), 0, true) {{ setTitle("Quiet hours end"); }}.show(),
+                store.quietFrom(), 0, true) {{ setTitle("Quiet hours start"); }}.show();
+    }
+
+    private void editSnippets() {
+        List<String> list = new ArrayList<>(store.snippets());
+        LinearLayout box = ui.vcol();
+        box.setPadding(dp(20), dp(8), dp(20), 0);
+        LinearLayout rows = ui.vcol();
+        box.addView(rows);
+        Runnable[] render = new Runnable[1];
+        render[0] = () -> {
+            rows.removeAllViews();
+            if (list.isEmpty()) rows.addView(Actions.hint(ui, "No quick commands yet."));
+            for (int i = 0; i < list.size(); i++) {
+                final int idx = i;
+                LinearLayout r = ui.hrow();
+                r.setPadding(dp(4), dp(2), 0, dp(2));
+                r.addView(ui.mono(list.get(i), 14, ui.onSurface), Ui.weight1());
+                ImageView del = ui.iconButton(R.drawable.ic_delete, ui.onSurfaceVariant);
+                del.setOnClickListener(v -> { list.remove(idx); render[0].run(); });
+                r.addView(del);
+                rows.addView(r);
+            }
+        };
+        render[0].run();
+        LinearLayout add = ui.hrow();
+        add.setPadding(0, dp(8), 0, 0);
+        EditText in = ui.input("e.g. npm run build");
+        in.setTypeface(android.graphics.Typeface.MONOSPACE);
+        add.addView(in, Ui.weight1());
+        ImageView plus = ui.iconButton(R.drawable.ic_add, ui.primary);
+        plus.setOnClickListener(v -> {
+            String t = in.getText().toString().trim();
+            if (t.isEmpty()) return;
+            list.add(t); in.setText(""); render[0].run();
+        });
+        add.addView(plus);
+        box.addView(add);
+        new AlertDialog.Builder(this, ui.dialogTheme())
+                .setTitle("Quick commands")
+                .setView(box)
+                .setPositiveButton("Save", (d, w) -> {
+                    String pending = in.getText().toString().trim();
+                    if (!pending.isEmpty()) list.add(pending);
+                    store.setSnippets(list);
+                    buildSettings();
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void copy(String text) {
+        ClipboardManager cm = getSystemService(ClipboardManager.class);
+        cm.setPrimaryClip(ClipData.newPlainText("S-remote", text));
+        toast("Copied");
+    }
+
+    private void exportHosts() {
+        String json = store.exportJson();
+        copy(json);
+        Intent share = new Intent(Intent.ACTION_SEND).setType("application/json")
+                .putExtra(Intent.EXTRA_TEXT, json).putExtra(Intent.EXTRA_SUBJECT, "S-remote hosts");
+        try { startActivity(Intent.createChooser(share, "Share S-remote hosts")); } catch (Exception ignored) {}
+    }
+
+    private void importHosts() {
+        EditText in = ui.input("Paste the exported JSON");
+        in.setSingleLine(false);
+        in.setMinLines(4);
+        in.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        in.setTypeface(android.graphics.Typeface.MONOSPACE);
+        ClipboardManager cm = getSystemService(ClipboardManager.class);
+        try {
+            CharSequence clip = cm.hasPrimaryClip() ? cm.getPrimaryClip().getItemAt(0).getText() : null;
+            if (clip != null && clip.toString().contains("\"hosts\"")) in.setText(clip);
+        } catch (Exception ignored) {}
+        LinearLayout box = ui.vcol();
+        box.setPadding(dp(20), dp(8), dp(20), 0);
+        box.addView(in);
+        new AlertDialog.Builder(this, ui.dialogTheme())
+                .setTitle("Import hosts")
+                .setView(box)
+                .setPositiveButton("Import", (d, w) -> {
+                    int n = store.importJson(in.getText().toString());
+                    if (n < 0) toast("That doesn't look like an S-remote export");
+                    else { toast(n == 0 ? "Nothing new to import" : "Imported " + n + " host" + (n == 1 ? "" : "s")); reload(); Actions.resyncMonitor(this); pollHosts(); }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
     }
 
     private void requestTile() {
@@ -833,160 +1166,7 @@ public class MainActivity extends Activity {
         store.setMonitorEnabled(on);
         if (on) { ensureNotifPermission(); MonitorService.start(this); }
         else MonitorService.stop(this);
-    }
-
-    // ---------------- host CRUD + launch ----------------
-    private void openHost(Host h) {
-        if (Tailscale.tailnetIp(this) == null && !Tailscale.vpnUp(this)) {
-            new AlertDialog.Builder(this, ui.dialogTheme())
-                    .setTitle("Tailscale seems off")
-                    .setMessage("No tailnet connection detected. Open " + h.name + " anyway?")
-                    .setPositiveButton("Open", (d, w) -> launch(h))
-                    .setNegativeButton("Cancel", null)
-                    .show();
-        } else launch(h);
-    }
-
-    private void launch(Host h) {
-        Intent i = new Intent(this, HostActivity.class);
-        i.putExtra(HostActivity.EXTRA_HOST_ID, h.id);
-        i.putExtra(HostActivity.EXTRA_NAME, h.name);
-        i.putExtra(HostActivity.EXTRA_URL, h.url);
-        startActivity(i);
-    }
-
-    private void hostMenu(Host h) {
-        String mute = h.notify ? "Mute notifications" : "Unmute notifications";
-        String[] items = {"Open", mute, "Add to home screen", "Edit", "Remove"};
-        new AlertDialog.Builder(this, ui.dialogTheme())
-                .setTitle(h.name)
-                .setItems(items, (d, w) -> {
-                    switch (w) {
-                        case 0: openHost(h); break;
-                        case 1: h.notify = !h.notify; store.update(h); reload(); resyncMonitor(); break;
-                        case 2: pinShortcut(h); break;
-                        case 3: hostDialog(h); break;
-                        case 4: confirmRemove(h); break;
-                    }
-                }).show();
-    }
-
-    private void confirmRemove(Host h) {
-        new AlertDialog.Builder(this, ui.dialogTheme())
-                .setTitle("Remove " + h.name + "?")
-                .setPositiveButton("Remove", (d, w) -> { store.remove(h.id); stats.remove(h.id); reload(); resyncMonitor(); })
-                .setNegativeButton("Cancel", null).show();
-    }
-
-    private void resyncMonitor() {
-        if (store.monitorEnabled()) MonitorService.start(this); // onStartCommand re-syncs
-    }
-
-    // ---------- launcher shortcuts ----------
-    private ShortcutInfo shortcutFor(Host h) {
-        Intent i = new Intent(this, MainActivity.class).setAction(ACTION_OPEN_HOST)
-                .putExtra(HostActivity.EXTRA_HOST_ID, h.id)
-                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);
-        return new ShortcutInfo.Builder(this, "host-" + h.id)
-                .setShortLabel(h.name.length() > 20 ? h.name.substring(0, 20) : h.name)
-                .setLongLabel("Open " + h.name)
-                .setIcon(Icon.createWithResource(this, R.mipmap.ic_launcher))
-                .setIntent(i).build();
-    }
-
-    private void updateShortcuts() {
-        try {
-            ShortcutManager sm = getSystemService(ShortcutManager.class);
-            if (sm == null) return;
-            List<ShortcutInfo> list = new ArrayList<>();
-            int max = Math.min(4, sm.getMaxShortcutCountPerActivity());
-            for (Host h : hosts) { if (list.size() >= max) break; list.add(shortcutFor(h)); }
-            sm.setDynamicShortcuts(list);
-        } catch (Exception ignored) {}
-    }
-
-    private void pinShortcut(Host h) {
-        ShortcutManager sm = getSystemService(ShortcutManager.class);
-        if (sm != null && sm.isRequestPinShortcutSupported()) sm.requestPinShortcut(shortcutFor(h), null);
-        else toast("Your launcher doesn't support pinned shortcuts");
-    }
-
-    // ---------- add / edit host ----------
-    private void hostDialog(Host edit) {
-        LinearLayout box = ui.vcol();
-        box.setPadding(dp(24), dp(8), dp(24), 0);
-
-        EditText name = new EditText(this);
-        name.setHint("Name (optional)");
-        name.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_WORDS);
-        box.addView(name);
-
-        EditText addr = new EditText(this);
-        addr.setHint("Tailscale address, e.g. 100.64.1.2:2209");
-        addr.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-        box.addView(addr);
-
-        TextView status = ui.text("", 13, ui.onSurfaceVariant, false);
-        status.setPadding(0, dp(8), 0, 0);
-        box.addView(status);
-
-        if (edit != null) { name.setText(edit.name); addr.setText(edit.url); }
-
-        AlertDialog d = new AlertDialog.Builder(this, ui.dialogTheme())
-                .setTitle(edit == null ? "Add host" : "Edit host")
-                .setView(box)
-                .setPositiveButton("Save", null)
-                .setNeutralButton("Save anyway", null)
-                .setNegativeButton("Cancel", null)
-                .create();
-        d.show();
-        d.getButton(AlertDialog.BUTTON_NEUTRAL).setVisibility(View.GONE);
-        d.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
-            String nm = name.getText().toString().trim();
-            String url = Host.normalizeUrl(addr.getText().toString());
-            if (url == null) { status.setTextColor(ui.err); status.setText("Invalid address"); return; }
-            if (url.matches("^http://[^/:]+$")) url = url + ":2209"; // bare IP/host → default port
-            final String fUrl = url;
-            status.setTextColor(ui.onSurfaceVariant);
-            status.setText("Checking " + fUrl + " …");
-            pool.execute(() -> {
-                String hostname = probe(fUrl);
-                main.post(() -> {
-                    if (hostname != null) {
-                        save(d, edit, nm.isEmpty() ? hostname : nm, fUrl);
-                    } else {
-                        status.setTextColor(ui.warn);
-                        status.setText("Unreachable — wrong address, or the host / Tailscale is off. “Save anyway” keeps it.");
-                        d.getButton(AlertDialog.BUTTON_NEUTRAL).setVisibility(View.VISIBLE);
-                    }
-                });
-            });
-        });
-        d.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(v -> {
-            String url = Host.normalizeUrl(addr.getText().toString());
-            if (url == null) { status.setTextColor(ui.err); status.setText("Invalid address"); return; }
-            if (url.matches("^http://[^/:]+$")) url = url + ":2209"; // bare IP/host → default port
-            String n = name.getText().toString().trim();
-            if (n.isEmpty()) n = url.replaceFirst("^[a-z]+://", "").split("[/:]")[0];
-            save(d, edit, n, url);
-        });
-    }
-
-    private void save(AlertDialog d, Host edit, String name, String url) {
-        if (edit != null) { edit.name = name; edit.url = url; store.update(edit); }
-        else store.add(name, url);
-        reload(); resyncMonitor(); pollHosts(); d.dismiss();
-        toast("Saved " + name);
-    }
-
-    /** GET /api/info → hostname, or null on failure */
-    private String probe(String base) {
-        try (Response r = http.newCall(new Request.Builder().url(base + "/api/info").build()).execute()) {
-            if (!r.isSuccessful() || r.body() == null) return null;
-            JSONObject o = new JSONObject(r.body().string());
-            String hn = o.optString("hostname");
-            return hn.isEmpty() ? "host" : hn;
-        } catch (Exception e) { return null; }
+        StatusWidget.refresh(this);
     }
 
     private void ensureNotifPermission() {
