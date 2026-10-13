@@ -230,7 +230,7 @@ body.disconnected #terms { opacity: .55; filter: saturate(.6); }
 
 /* ---------- keybar + typerow (touch/narrow) ---------- */
 #keybar, #typerow { display: none; }
-body.touch-ui #typerow {
+body.touch-ui #typerow, body.typebar #typerow {
   display: flex; gap: 6px; padding: 7px 8px 0;
   background: var(--bg2); border-top: 1px solid var(--border); flex-shrink: 0;
   position: relative;
@@ -621,8 +621,8 @@ button svg { pointer-events: none; }
 .fp-item:hover { background: rgba(255,255,255,.05); }
 
 /* touch: typer + keybar */
-body.touch-ui #typerow, body.touch-ui #keybar { background: var(--glass); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur); }
-body.touch-ui #typerow { border-top: 1px solid var(--glass-brd); }
+body.touch-ui #typerow, body.touch-ui #keybar, body.typebar #typerow { background: var(--glass); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur); }
+body.touch-ui #typerow, body.typebar #typerow { border-top: 1px solid var(--glass-brd); }
 #typer { background: rgba(0,0,0,.28); border: 1px solid var(--glass-brd-hi); border-radius: 12px; transition: border-color .15s, box-shadow .15s; }
 #typer:focus { border-color: var(--accent3); box-shadow: 0 0 0 3px rgba(139,123,255,.18); }
 .ty-btn { border-radius: 10px; background: rgba(255,255,255,.06); border-color: var(--glass-brd-hi); }

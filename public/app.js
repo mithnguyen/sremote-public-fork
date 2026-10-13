@@ -59,7 +59,12 @@ function copySel(term) {
 const isCoarse = matchMedia("(pointer: coarse)").matches;
 const mqNarrow = matchMedia("(max-width: 720px)");
 function syncTouchUI() { document.body.classList.toggle("touch-ui", isCoarse || mqNarrow.matches); }
+function applyTypebar() {
+  // rd.typebar: unset/"1" = always show, "0" = touch/narrow only
+  document.body.classList.toggle("typebar", localStorage.getItem("rd.typebar") !== "0");
+}
 syncTouchUI();
+applyTypebar();
 const mqHandler = () => { syncTouchUI(); applyToggles(); };
 if (mqNarrow.addEventListener) mqNarrow.addEventListener("change", mqHandler);
 else if (mqNarrow.addListener) mqNarrow.addListener(mqHandler); // iOS < 14
@@ -724,6 +729,7 @@ const KB_KEYS = [
   { id: "up", l: "↑", d: "\x1b[A" }, { id: "right", l: "→", d: "\x1b[C" },
   { id: "pipe", l: "|", d: "|" }, { id: "tilde", l: "~", d: "~" },
   { id: "dash", l: "-", d: "-" }, { id: "slash", l: "/", d: "/" },
+  { id: "space", l: "Space", d: " " },
   { id: "c-c", l: "C-c", d: "\x03" }, { id: "c-z", l: "C-z", d: "\x1a" },
   { id: "c-d", l: "C-d", d: "\x04" }, { id: "c-l", l: "C-l", d: "\x0c" },
   { id: "pgup", l: "PgUp", d: "\x1b[5~" }, { id: "pgdn", l: "PgDn", d: "\x1b[6~" },
@@ -735,7 +741,7 @@ const KB_KEYS = [
   { id: "f1", l: "F1", d: "\x1bOP" }, { id: "f2", l: "F2", d: "\x1bOQ" },
   { id: "f3", l: "F3", d: "\x1bOR" }, { id: "f4", l: "F4", d: "\x1bOS" },
 ];
-const KB_DEFAULT = ["esc", "tab", "ctrl", "alt", "left", "down", "up", "right", "pipe", "tilde", "dash", "slash", "c-c", "c-z", "c-d", "c-l"];
+const KB_DEFAULT = ["esc", "tab", "ctrl", "alt", "left", "down", "up", "right", "pipe", "tilde", "dash", "slash", "space", "c-c", "c-z", "c-d", "c-l"];
 function kbConfig() {
   try {
     const a = JSON.parse(localStorage.getItem("rd.keybar.v1") || "null");
@@ -1253,6 +1259,7 @@ function openSettings() {
   for (const b of setModal.querySelectorAll("#set-theme button")) b.classList.toggle("on", b.dataset.v === themeName);
   const ss = $("#set-shell"), saved = localStorage.getItem("rd.shell") || "";
   ss.value = [...ss.options].some((o) => o.value === saved) ? saved : (ss.options[0] ? ss.options[0].value : "");
+  $("#set-typebar").checked = localStorage.getItem("rd.typebar") !== "0";
   renderSetKeys();
   setModal.classList.remove("hidden");
 }
@@ -1271,6 +1278,7 @@ for (const b of document.querySelectorAll("#set-theme button")) {
   };
 }
 $("#set-shell").onchange = (e) => localStorage.setItem("rd.shell", e.target.value);
+$("#set-typebar").onchange = (e) => { localStorage.setItem("rd.typebar", e.target.checked ? "1" : "0"); applyTypebar(); };
 $("#set-reset").onclick = () => {
   for (const k of ["rd.w.side", "rd.w.files", "rd.sidebar", "rd.files"]) localStorage.removeItem(k);
   sidebar.style.width = ""; filesPanel.style.width = "";
