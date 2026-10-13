@@ -272,12 +272,12 @@ body.touch-ui .tm-touch { display: flex; }
 #typer-more:active { opacity: 1; }
 .ty-btn:active { filter: brightness(1.3); }
 .ty-primary { background: linear-gradient(135deg, #5aa2ff, #37d99a); color: #071019; border: 0; }
-body.touch-ui #keybar {
+body.touch-ui #keybar, body.typebar #keybar {
   display: flex; gap: 6px; padding: 7px 8px calc(7px + env(safe-area-inset-bottom));
   background: var(--bg2);
   overflow-x: auto; scrollbar-width: none; flex-shrink: 0;
 }
-body.touch-ui #keybar::-webkit-scrollbar { display: none; }
+body.touch-ui #keybar::-webkit-scrollbar, body.typebar #keybar::-webkit-scrollbar { display: none; }
 .kb-key {
   flex-shrink: 0; min-width: 42px; padding: 9px 10px; font-size: 13px; font-weight: 600;
   background: var(--bg3); color: var(--fg); border: 1px solid var(--border);
@@ -621,7 +621,7 @@ button svg { pointer-events: none; }
 .fp-item:hover { background: rgba(255,255,255,.05); }
 
 /* touch: typer + keybar */
-body.touch-ui #typerow, body.touch-ui #keybar, body.typebar #typerow { background: var(--glass); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur); }
+body.touch-ui #typerow, body.touch-ui #keybar, body.typebar #typerow, body.typebar #keybar { background: var(--glass); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur); }
 body.touch-ui #typerow, body.typebar #typerow { border-top: 1px solid var(--glass-brd); }
 #typer { background: rgba(0,0,0,.28); border: 1px solid var(--glass-brd-hi); border-radius: 12px; transition: border-color .15s, box-shadow .15s; }
 #typer:focus { border-color: var(--accent3); box-shadow: 0 0 0 3px rgba(139,123,255,.18); }
