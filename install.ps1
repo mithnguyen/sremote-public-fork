@@ -18,11 +18,27 @@ $script:runningRoot    = $null   # dir the :2209 server reports (api/info.root)
 $script:liveBrokerDir  = $null   # dir whose session-host.js broker is alive
 $candSet = [ordered]@{}
 
+function Test-BroadDir($d) {
+    # a stray server.js at a broad location must never make it an "install dir" -
+    # choosing it later would mass-kill processes or delete user folders
+    try { $d = [IO.Path]::GetFullPath($d).TrimEnd('\') } catch { return $true }
+    $broad = @($env:SystemDrive.TrimEnd('\'), "$env:SystemDrive\Users", $env:USERPROFILE.TrimEnd('\'),
+               $env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramData, $env:SystemRoot,
+               "$env:USERPROFILE\Desktop", "$env:USERPROFILE\Documents", "$env:USERPROFILE\Downloads")
+    return ($broad -contains $d)
+}
 function Add-InstallCandidate([string]$d) {
     if (-not $d) { return }
     try {
+        # an S-remote install always has server.js AND our payload markers -
+        # a random node project with its own server.js must never qualify
         if (-not (Test-Path (Join-Path $d 'server.js'))) { return }
+        $ours = (Test-Path (Join-Path $d 'public\app.js')) -or
+                (Test-Path (Join-Path $d 'agent\session-host.js')) -or
+                (Test-Path (Join-Path $d 'install.ps1'))
+        if (-not $ours) { return }
         $p = [IO.Path]::GetFullPath($d).TrimEnd('\')
+        if (Test-BroadDir $p) { return }
         if (-not $candSet.Contains($p)) { $candSet[$p] = $true }
     } catch {}
 }
@@ -302,8 +318,9 @@ if ($LASTEXITCODE -eq 0) {
 # stop old tray first — a running tray won't auto-revive a killed server,
 # and the fresh tray instance below starts the server itself
 Get-Process SremoteTray -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+$escDir = [regex]::Escape($dir)
 Get-CimInstance Win32_Process -Filter "name='node.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -like "*$dir\server.js*" } |
+    Where-Object { $_.CommandLine -match "$escDir[\\/]server\.js" } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 # server launched as "node server.js" (relative) hides its dir from cmdline -
 # attribute by port instead: the node process listening on :2209 is ours.
@@ -328,15 +345,32 @@ try {
     Write-Host "OK - S-remote $(if($update){'updated'}else{'installed'}) (server starting...)"
 }
 # ---------- 6. remove duplicate install dirs (fix mode) -------------------------
-# the new server is already up in $dir — kill anything still running out of the
-# duplicate dir (tray, stray node) so its files unlock, then delete the dir
+# kill only processes that ARE the duplicate install — an exe inside the dir or
+# our own scripts run from it — plus their whole descendant tree (covers PTY
+# shells under the broker). Anything merely mentioning the path (editors with a
+# file open there, terminals cd'd into it) is left alone.
 foreach ($dupe in $fixDupes) {
     if ([IO.Path]::GetFullPath($dupe) -eq [IO.Path]::GetFullPath($dir)) { continue }
+    if (Test-BroadDir $dupe) { Write-Host "    SKIP cleaning $dupe - dir too broad, refusing"; continue }
     Write-Host "    removing duplicate install: $dupe"
     $esc = [regex]::Escape($dupe.TrimEnd('\'))
-    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-        Where-Object { ($_.CommandLine -match "$esc[\\/]") -or ($_.ExecutablePath -match "$esc[\\/]") } |
-        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    $ourFiles = '(server\.js|agent[\\/][^"\\'']*\.(js|exe|ps1)|start\.(cmd|bat)|install\.(bat|ps1)|SremoteTray\.exe|ScreenPro\.exe)'
+    $procs  = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue
+    $byPpid = @{}
+    foreach ($p in $procs) { $byPpid[$p.ParentProcessId] += @($p.ProcessId) }
+    $kill = @{}; $queue = New-Object System.Collections.Queue
+    foreach ($p in $procs) {
+        $seed = ($p.ExecutablePath -and $p.ExecutablePath -match "^$esc[\\/]") -or
+                ($p.CommandLine -and $p.CommandLine -match "$esc[\\/]$ourFiles")
+        if ($seed -and -not $kill.ContainsKey($p.ProcessId)) { $kill[$p.ProcessId] = $true; $queue.Enqueue($p.ProcessId) }
+    }
+    while ($queue.Count -gt 0) {
+        $ppid = $queue.Dequeue()
+        foreach ($c in @($byPpid[$ppid])) {
+            if ($c -and -not $kill.ContainsKey($c)) { $kill[$c] = $true; $queue.Enqueue($c) }
+        }
+    }
+    foreach ($k in $kill.Keys) { Stop-Process -Id $k -Force -ErrorAction SilentlyContinue }
     Start-Sleep -Seconds 1
     try { Remove-Item $dupe -Recurse -Force -ErrorAction Stop
           Write-Host "    removed $dupe" }

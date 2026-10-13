@@ -21,8 +21,15 @@ Write-Host "    current install: $cur"
 $found = @{}
 function Add-Found([string]$d) {
     if (-not $d) { return }
-    try { if (Test-Path (Join-Path $d 'state.json')) {
-              $found[[IO.Path]::GetFullPath($d).TrimEnd('\')] = $true } } catch {}
+    try {
+        # must look like an S-remote install, not just any dir with state.json
+        if (-not (Test-Path (Join-Path $d 'state.json'))) { return }
+        $ours = (Test-Path (Join-Path $d 'server.js')) -or
+                (Test-Path (Join-Path $d 'agent\session-host.js')) -or
+                (Test-Path (Join-Path $d 'public\app.js')) -or
+                (Test-Path (Join-Path $d 'install.ps1'))
+        if ($ours) { $found[[IO.Path]::GetFullPath($d).TrimEnd('\')] = $true }
+    } catch {}
 }
 function Get-PathFromCmd([string]$raw) {
     if (-not $raw) { return $null }
@@ -96,20 +103,45 @@ $env:SREMOTE_DIR = $target
 Invoke-Expression (Invoke-RestMethod 'https://raw.githubusercontent.com/thsangyk-oss/sremote/main/install.ps1')
 
 # ---------- remove the duplicate dir the bad update created ---------------------
+function Test-BroadDir($d) {
+    try { $d = [IO.Path]::GetFullPath($d).TrimEnd('\') } catch { return $true }
+    $broad = @($env:SystemDrive.TrimEnd('\'), "$env:SystemDrive\Users", $env:USERPROFILE.TrimEnd('\'),
+               $env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramData, $env:SystemRoot,
+               "$env:USERPROFILE\Desktop", "$env:USERPROFILE\Documents", "$env:USERPROFILE\Downloads")
+    return ($broad -contains $d)
+}
 if ([IO.Path]::GetFullPath($cur) -ne [IO.Path]::GetFullPath($target) -and (Test-Path $cur)) {
+    if (Test-BroadDir $cur) {
+        Write-Host ""
+        Write-Host "    SKIP removing $cur - dir too broad, refusing to touch it"
+    } else {
     Write-Host ""
     Write-Host "==> removing duplicate install at $cur"
-    # kill any leftover processes that lock files inside $cur
-    $esc = [regex]::Escape($cur)
-    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -match $esc -or $_.ExecutablePath -match $esc } |
-        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-    Get-Process SremoteTray -ErrorAction SilentlyContinue |
-        Where-Object { $_.Path -match $esc } | Stop-Process -Force -ErrorAction SilentlyContinue
+    # kill only processes that ARE that install (exe inside it or our scripts run
+    # from it) plus their descendants - never anything that merely names the path
+    $esc = [regex]::Escape($cur.TrimEnd('\'))
+    $ourFiles = '(server\.js|agent[\\/][^"\\'']*\.(js|exe|ps1)|start\.(cmd|bat)|install\.(bat|ps1)|SremoteTray\.exe|ScreenPro\.exe)'
+    $procs  = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue
+    $byPpid = @{}
+    foreach ($p in $procs) { $byPpid[$p.ParentProcessId] += @($p.ProcessId) }
+    $kill = @{}; $queue = New-Object System.Collections.Queue
+    foreach ($p in $procs) {
+        $seed = ($p.ExecutablePath -and $p.ExecutablePath -match "^$esc[\\/]") -or
+                ($p.CommandLine -and $p.CommandLine -match "$esc[\\/]$ourFiles")
+        if ($seed -and -not $kill.ContainsKey($p.ProcessId)) { $kill[$p.ProcessId] = $true; $queue.Enqueue($p.ProcessId) }
+    }
+    while ($queue.Count -gt 0) {
+        $ppid = $queue.Dequeue()
+        foreach ($c in @($byPpid[$ppid])) {
+            if ($c -and -not $kill.ContainsKey($c)) { $kill[$c] = $true; $queue.Enqueue($c) }
+        }
+    }
+    foreach ($k in $kill.Keys) { Stop-Process -Id $k -Force -ErrorAction SilentlyContinue }
     Start-Sleep -Seconds 1
     try { Remove-Item $cur -Recurse -Force -ErrorAction Stop
           Write-Host "    removed $cur" }
     catch { Write-Host "    WARN: could not fully remove $cur - delete it manually after a reboot" }
+    }
 }
 
 Write-Host ""
