@@ -20,9 +20,11 @@ $candSet = [ordered]@{}
 
 function Add-InstallCandidate([string]$d) {
     if (-not $d) { return }
-    if (-not (Test-Path (Join-Path $d 'server.js'))) { return }
-    $p = [IO.Path]::GetFullPath($d).TrimEnd('\')
-    if (-not $candSet.Contains($p)) { $candSet[$p] = $true }
+    try {
+        if (-not (Test-Path (Join-Path $d 'server.js'))) { return }
+        $p = [IO.Path]::GetFullPath($d).TrimEnd('\')
+        if (-not $candSet.Contains($p)) { $candSet[$p] = $true }
+    } catch {}
 }
 function Get-WsCount($d) {
     try { return @((Get-Content (Join-Path $d 'state.json') -Raw -ErrorAction Stop | ConvertFrom-Json).workspaces).Count }
@@ -69,37 +71,53 @@ Get-CimInstance Win32_Process -Filter "name='SremoteTray.exe'" -ErrorAction Sile
     if ($_.ExecutablePath -match '([A-Za-z]:[\\/][^"'']*)[\\/]agent[\\/]tray[\\/]SremoteTray\.exe') { Add-InstallCandidate $Matches[1] }
 }
 
-# d) scheduled task action -> start.cmd in root, or tray exe two levels down
-try { $t = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
-      $exe = ($t.Actions[0].Execute -replace '"','')
-      $d = Split-Path $exe -Parent
-      Add-InstallCandidate $d                                            # <dir>\start.cmd
-      Add-InstallCandidate (Split-Path (Split-Path $d -Parent) -Parent)  # <dir>\agent\tray\*.exe
-} catch {}
+# helper: first absolute path inside a raw command/action string
+function Get-PathFromCmd([string]$raw) {
+    if (-not $raw) { return $null }
+    $raw = [Environment]::ExpandEnvironmentVariables($raw)   # %LOCALAPPDATA% etc.
+    if ($raw -match '"([A-Za-z]:[\\/][^"]+)"') { return $Matches[1] }
+    if ($raw -match '([A-Za-z]:[\\/][^\s"'']+)') { return $Matches[1] }
+    return $null
+}
+function Add-ExeParent($m) {
+    if (-not $m) { return }
+    $d = Split-Path $m -Parent
+    Add-InstallCandidate $d                                            # <dir>\start.cmd
+    Add-InstallCandidate (Split-Path (Split-Path $d -Parent) -Parent)  # <dir>\agent\tray\*.exe
+}
 
-# e) autostart Run keys -> same shapes as the scheduled task
+# d) scheduled task actions -> Execute AND Arguments (cmd /c "D:\x\start.cmd")
+try { foreach ($a in (Get-ScheduledTask -TaskName $taskName -ErrorAction Stop).Actions) {
+          Add-ExeParent (Get-PathFromCmd $a.Execute)
+          Add-ExeParent (Get-PathFromCmd $a.Arguments)
+      } } catch {}
+
+# e) autostart Run keys -> same shapes, %env% vars expanded, extra args ignored
 foreach ($rk in 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run',
                 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run') {
     try { $v = (Get-ItemProperty $rk -Name 'S-remote' -ErrorAction Stop).'S-remote'
-          $d = Split-Path ($v.Trim('"')) -Parent
-          Add-InstallCandidate $d
-          Add-InstallCandidate (Split-Path (Split-Path $d -Parent) -Parent) } catch {}
+          Add-ExeParent (Get-PathFromCmd $v) } catch {}
 }
 
-# f) every top-level dir on every drive, plus one "sremote"-named level deeper
-#    (covers C:\sremote, D:\tools\sremote, X:\myserver, ...)
+# f) every top-level dir on every drive, plus one level deeper for dirs whose
+#    name mentions "remote" (covers C:\sremote, D:\tools\sremote, D:\x\my-remote)
 foreach ($drv in (Get-PSDrive -PSProvider FileSystem)) {
     Get-ChildItem $drv.Root -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object {
         Add-InstallCandidate $_.FullName
-        foreach ($n in 'S-remote','Sremote','sremote') { Add-InstallCandidate (Join-Path $_.FullName $n) }
+        Get-ChildItem $_.FullName -Directory -Force -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match 'remote' } | ForEach-Object { Add-InstallCandidate $_.FullName }
     }
 }
 
-# g) well-known spots
-foreach ($d in @("$env:LOCALAPPDATA\S-remote", "$env:USERPROFILE\S-remote", "$env:USERPROFILE\sremote",
-                 "$env:USERPROFILE\Desktop\S-remote", "$env:USERPROFILE\Documents\S-remote", "$env:ProgramData\S-remote")) {
-    Add-InstallCandidate $d
+# g) well-known spots - current user AND every profile under <sysdrive>\Users
+#    (the install may belong to another admin account on the same machine)
+$well = @("$env:LOCALAPPDATA\S-remote", "$env:USERPROFILE\S-remote", "$env:USERPROFILE\sremote",
+          "$env:USERPROFILE\Desktop\S-remote", "$env:USERPROFILE\Documents\S-remote", "$env:ProgramData\S-remote")
+Get-ChildItem "$env:SystemDrive\Users" -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object {
+    $u = $_.FullName
+    $well += "$u\AppData\Local\S-remote", "$u\S-remote", "$u\sremote", "$u\Desktop\S-remote", "$u\Documents\S-remote"
 }
+foreach ($d in $well) { Add-InstallCandidate $d }
 
 $cands    = @($candSet.Keys)
 $dir      = $null

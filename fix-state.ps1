@@ -19,24 +19,53 @@ Write-Host "    current install: $cur"
 
 # ---------- find the ORIGINAL install dir (has state.json / live broker) -------
 $found = @{}
-# 1) any top-level dir on any drive with server.js + state.json (custom installs)
+function Add-Found([string]$d) {
+    if (-not $d) { return }
+    try { if (Test-Path (Join-Path $d 'state.json')) {
+              $found[[IO.Path]::GetFullPath($d).TrimEnd('\')] = $true } } catch {}
+}
+function Get-PathFromCmd([string]$raw) {
+    if (-not $raw) { return $null }
+    $raw = [Environment]::ExpandEnvironmentVariables($raw)
+    if ($raw -match '"([A-Za-z]:[\\/][^"]+)"') { return $Matches[1] }
+    if ($raw -match '([A-Za-z]:[\\/][^\s"'']+)') { return $Matches[1] }
+    return $null
+}
+function Add-ExeParent($m) {
+    if (-not $m) { return }
+    $d = Split-Path $m -Parent
+    Add-Found $d
+    Add-Found (Split-Path (Split-Path $d -Parent) -Parent)   # <dir>\agent\tray -> <dir>
+}
+
+# 1) drive scan: top-level dirs, plus one level deeper for *remote*-named dirs
 foreach ($drv in (Get-PSDrive -PSProvider FileSystem)) {
-    Get-ChildItem $drv.Root -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-        $d = $_.FullName
-        if ((Test-Path (Join-Path $d 'server.js')) -and (Test-Path (Join-Path $d 'state.json'))) { $found[$d] = $true }
+    Get-ChildItem $drv.Root -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object {
+        Add-Found $_.FullName
+        Get-ChildItem $_.FullName -Directory -Force -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match 'remote' } | ForEach-Object { Add-Found $_.FullName }
     }
 }
-# 2) well-known spots + user profile subdirs
-foreach ($d in @("$env:LOCALAPPDATA\S-remote", "$env:USERPROFILE\S-remote", "$env:USERPROFILE\sremote")) {
-    if (Test-Path (Join-Path $d 'state.json')) { $found[$d] = $true } }
-# 3) autostart Run keys -> exe's dir (or its grandparent for agent\tray)
+# 2) well-known spots - current user AND every profile under <sysdrive>\Users
+$well = @("$env:LOCALAPPDATA\S-remote", "$env:USERPROFILE\S-remote", "$env:USERPROFILE\sremote",
+          "$env:USERPROFILE\Desktop\S-remote", "$env:USERPROFILE\Documents\S-remote", "$env:ProgramData\S-remote")
+Get-ChildItem "$env:SystemDrive\Users" -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object {
+    $u = $_.FullName
+    $well += "$u\AppData\Local\S-remote", "$u\S-remote", "$u\sremote", "$u\Desktop\S-remote", "$u\Documents\S-remote"
+}
+foreach ($d in $well) { Add-Found $d }
+# 3) autostart: scheduled task actions + Run keys (env vars expanded, args ok)
+try { foreach ($a in (Get-ScheduledTask -TaskName 'S-remote' -ErrorAction Stop).Actions) {
+          Add-ExeParent (Get-PathFromCmd $a.Execute)
+          Add-ExeParent (Get-PathFromCmd $a.Arguments) } } catch {}
 foreach ($rk in 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run',
                 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run') {
-    try { $v = (Get-ItemProperty $rk -Name 'S-remote' -ErrorAction Stop).'S-remote'
-          $d = Split-Path ($v.Trim('"')) -Parent
-          if (Test-Path (Join-Path $d 'state.json')) { $found[$d] = $true }
-          $d2 = Split-Path (Split-Path $d -Parent) -Parent
-          if ($d2 -and (Test-Path (Join-Path $d2 'state.json'))) { $found[$d2] = $true } } catch {}
+    try { Add-ExeParent (Get-PathFromCmd (Get-ItemProperty $rk -Name 'S-remote' -ErrorAction Stop).'S-remote') } catch {}
+}
+# 4) live processes: broker + server.js absolute paths reveal deep install dirs
+foreach ($p in (Get-CimInstance Win32_Process -Filter "name='node.exe'" -ErrorAction SilentlyContinue)) {
+    if ($p.CommandLine -match '([A-Za-z]:[\\/][^"'']*)[\\/]agent[\\/]session-host\.js') { Add-Found $Matches[1] }
+    if ($p.CommandLine -match '([A-Za-z]:[\\/][^"'']*server\.js)') { Add-Found (Split-Path $Matches[1] -Parent) }
 }
 
 $target = $null; $best = $null; $bestN = -1
