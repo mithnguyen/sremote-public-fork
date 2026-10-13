@@ -48,6 +48,19 @@ place and remove the duplicate:
 irm https://raw.githubusercontent.com/thsangyk-oss/sremote/main/fix-state.ps1 | iex
 ```
 
+**Admin rights in every terminal session?** Sessions inherit the token of
+the service chain (task → tray → server → PTY), so elevate the autostart
+task once and every session gets admin — no UAC prompts:
+
+```powershell
+irm https://raw.githubusercontent.com/thsangyk-oss/sremote/main/elevate.ps1 | iex
+```
+
+The script self-elevates, switches the `S-remote` task to "run with highest
+privileges" and restarts the chain — live terminal sessions end, workspaces
+are kept. New installs run from an elevated shell do this automatically;
+set `$env:SREMOTE_LIMITED=1` before `irm` to opt out.
+
 Then open from any device in the tailnet:
 
 ```

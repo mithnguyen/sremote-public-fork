@@ -252,8 +252,19 @@ start "" /min node server.js
 "@ | Set-Content (Join-Path $dir 'start.cmd') -Encoding ascii
 
 $launch = if (Test-Path $trayExe) { "`"$trayExe`"" } else { "`"$dir\start.cmd`"" }
-schtasks /create /f /tn $taskName /tr $launch /sc onlogon /rl limited | Out-Null
-if ($LASTEXITCODE -ne 0) {
+# prefer an elevated task: tray -> server -> session broker -> PTYs all inherit
+# the admin token, so every terminal session gets admin rights without UAC.
+# creating a "highest" task needs an elevated shell; degrade gracefully.
+$elevTask = $false
+if (-not $env:SREMOTE_LIMITED) {
+    schtasks /create /f /tn $taskName /tr $launch /sc onlogon /rl highest | Out-Null
+    $elevTask = ($LASTEXITCODE -eq 0)
+}
+if (-not $elevTask) {
+    schtasks /create /f /tn $taskName /tr $launch /sc onlogon /rl limited | Out-Null
+}
+if ($elevTask) { Write-Host "    autostart task runs elevated - sessions get admin rights" }
+if (-not $elevTask -and $LASTEXITCODE -ne 0) {
     # no admin? fall back to per-user Run key (tray menu manages it too)
     try {
         $rk = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
