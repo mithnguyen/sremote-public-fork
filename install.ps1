@@ -1,4 +1,4 @@
-﻿# S-remote installer / updater for Windows
+# S-remote installer / updater for Windows
 #   irm https://raw.githubusercontent.com/thsangyk-oss/sremote/main/install.ps1 | iex
 # Options (env): $env:SREMOTE_DIR to choose install dir
 $ErrorActionPreference = 'Stop'
@@ -10,7 +10,7 @@ $nodeVer  = 'v22.11.0'   # fallback portable Node LTS - only fetched when no nod
 
 # ---------- 0. locate install dir(s) -------------------------------------------
 # Older installers could miss the real install dir and drop a fresh copy into
-# %LOCALAPPDATA% — hiding workspaces (state.json) and live sessions (broker).
+# %LOCALAPPDATA% - hiding workspaces (state.json) and live sessions (broker).
 # Instead of returning the first match we collect EVERY dir that looks like an
 # install; if several exist we ask the user: fresh install, or fix + install
 # into the original dir (re-attaches sessions, merges state, removes dupes).
@@ -75,7 +75,7 @@ foreach ($p in (Get-CimInstance Win32_Process -Filter "name='node.exe'" -ErrorAc
     if ($p.CommandLine -match '([A-Za-z]:[\\/][^"'']*server\.js)') {
         Add-InstallCandidate (Split-Path $Matches[1] -Parent)
     }
-    # "node server.js" (relative) hides its dir — its parent is the tray exe,
+    # "node server.js" (relative) hides its dir - its parent is the tray exe,
     # whose absolute path sits at <dir>\agent\tray\SremoteTray.exe
     if ($p.ParentProcessId) {
         $par = Get-CimInstance Win32_Process -Filter "ProcessId=$($p.ParentProcessId)" -ErrorAction SilentlyContinue
@@ -289,13 +289,15 @@ $launch = if (Test-Path $trayExe) { "`"$trayExe`"" } else { "`"$dir\start.cmd`""
 # prefer an elevated task: tray -> server -> session broker -> PTYs all inherit
 # the admin token, so every terminal session gets admin rights without UAC.
 # creating a "highest" task needs an elevated shell; degrade gracefully.
+# NOTE: native stderr merged via 2>&1 becomes a terminating error under
+# $ErrorActionPreference='Stop' - wrap every may-fail native call in try/catch.
 $elevTask = $false
 if (-not $env:SREMOTE_LIMITED) {
-    schtasks /create /f /tn $taskName /tr $launch /sc onlogon /rl highest | Out-Null
+    try { schtasks /create /f /tn $taskName /tr $launch /sc onlogon /rl highest >$null 2>&1 } catch {}
     $elevTask = ($LASTEXITCODE -eq 0)
 }
 if (-not $elevTask) {
-    schtasks /create /f /tn $taskName /tr $launch /sc onlogon /rl limited | Out-Null
+    try { schtasks /create /f /tn $taskName /tr $launch /sc onlogon /rl limited >$null 2>&1 } catch {}
 }
 if ($elevTask) { Write-Host "    autostart task runs elevated - sessions get admin rights" }
 if (-not $elevTask -and $LASTEXITCODE -ne 0) {
@@ -308,14 +310,16 @@ if (-not $elevTask -and $LASTEXITCODE -ne 0) {
     } catch { Write-Host "    WARN: could not register autostart" }
 }
 
-# firewall rule for TCP 2209 - only when elevated; harmless otherwise
-net session >$null 2>&1
+# firewall rule for TCP 2209 - only when elevated; harmless otherwise.
+# net session exits 1 with "Access is denied" off an admin shell - that stderr
+# would abort the whole script if merged, so it stays inside try/catch.
+try { net session >$null 2>&1 } catch {}
 if ($LASTEXITCODE -eq 0) {
     netsh advfirewall firewall add rule name="S-remote" dir=in action=allow protocol=TCP localport=2209 | Out-Null
 }
 
 # ---------- 5. (re)start -------------------------------------------------------
-# stop old tray first — a running tray won't auto-revive a killed server,
+# stop old tray first - a running tray won't auto-revive a killed server,
 # and the fresh tray instance below starts the server itself
 Get-Process SremoteTray -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 $escDir = [regex]::Escape($dir)
@@ -332,7 +336,7 @@ Get-NetTCPConnection -LocalPort 2209 -State Listen -ErrorAction SilentlyContinue
         $p = Get-Process -Id $_ -ErrorAction SilentlyContinue
         if ($p -and $p.ProcessName -eq 'node') { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }
     }
-schtasks /run /tn $taskName >$null 2>&1
+try { schtasks /run /tn $taskName >$null 2>&1 } catch {}
 if ($LASTEXITCODE -ne 0) { Start-Process -FilePath "$dir\start.cmd" -WindowStyle Hidden }
 Start-Sleep -Seconds 2
 
@@ -345,8 +349,8 @@ try {
     Write-Host "OK - S-remote $(if($update){'updated'}else{'installed'}) (server starting...)"
 }
 # ---------- 6. remove duplicate install dirs (fix mode) -------------------------
-# kill only processes that ARE the duplicate install — an exe inside the dir or
-# our own scripts run from it — plus their whole descendant tree (covers PTY
+# kill only processes that ARE the duplicate install - an exe inside the dir or
+# our own scripts run from it - plus their whole descendant tree (covers PTY
 # shells under the broker). Anything merely mentioning the path (editors with a
 # file open there, terminals cd'd into it) is left alone.
 foreach ($dupe in $fixDupes) {
@@ -377,7 +381,7 @@ foreach ($dupe in $fixDupes) {
     catch { Write-Host "    WARN: could not fully remove $dupe - delete it manually after a reboot" }
 }
 
-if ($relTag) { Write-Host "    Install complete — version $relTag" }
+if ($relTag) { Write-Host "    Install complete - version $relTag" }
 Write-Host "    Local:     http://localhost:2209"
 Write-Host "    Tailscale: http://<this-machine-tailscale-ip>:2209"
 Write-Host "    Dir:       $dir  (autostarts at logon)"

@@ -72,8 +72,10 @@ $launch  = if (Test-Path $trayExe) { "`"$trayExe`"" } else { "`"$(Join-Path $dir
 # password - impossible on passwordless Microsoft accounts (Windows Hello).
 # Set-ScheduledTask keeps the same principal and only flips RunLevel, so no
 # password is ever requested. Recreating the task without /ru also never asks.
+# native stderr merged via 2>&1 terminates under ErrorActionPreference='Stop'
+# (NativeCommandError) - keep every may-fail native call inside try/catch.
 $taskExists = $false
-schtasks /query /tn $taskName >$null 2>&1
+try { schtasks /query /tn $taskName >$null 2>&1 } catch {}
 if ($LASTEXITCODE -eq 0) { $taskExists = $true }
 
 $done = $false
@@ -87,8 +89,8 @@ if ($taskExists) {
     } catch { $done = $false }
 }
 if (-not $done) {
-    schtasks /delete /f /tn $taskName >$null 2>&1
-    schtasks /create /f /tn $taskName /tr $launch /sc onlogon /rl highest | Out-Null
+    try { schtasks /delete /f /tn $taskName >$null 2>&1 } catch {}
+    try { schtasks /create /f /tn $taskName /tr $launch /sc onlogon /rl highest >$null 2>&1 } catch {}
     if ($LASTEXITCODE -ne 0) { Write-Host "ERROR: could not create elevated task"; return }
 }
 Write-Host "task '$taskName' now runs with highest privileges"
@@ -113,8 +115,8 @@ Get-Process SremoteTray -ErrorAction SilentlyContinue | Stop-Process -Force -Err
 Get-CimInstance Win32_Process -Filter "name='node.exe'" -ErrorAction SilentlyContinue |
     Where-Object { $_.CommandLine -match 'server\.js|session-host\.js' } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-schtasks /end /tn $taskName >$null 2>&1
-schtasks /run /tn $taskName >$null 2>&1
+try { schtasks /end /tn $taskName >$null 2>&1 } catch {}
+try { schtasks /run /tn $taskName >$null 2>&1 } catch {}
 Start-Sleep -Seconds 3
 
 try {
