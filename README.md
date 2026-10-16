@@ -151,6 +151,26 @@ running, and scrollback buffers stay resident. Broker crash → server
 respawns it; sessions restore from `data/sessions.json` +
 `data/scrollback/` (respawned shells — same as the old restart path).
 
+## File explorer
+
+The **File transfer** card on the home page opens a full file explorer
+for the whole machine (not just workspaces): drive list → Home/Desktop/
+Documents/Downloads/workspace shortcuts, breadcrumb + back/fwd history,
+sortable Name/Size/Modified columns, filter box, Ctrl/Shift multi-select,
+right-click context menu, drag-drop upload.
+
+- Download: file → direct; folder or multi-select → auto-zipped first.
+- Upload: up to 4 GB per file, progress bar, into the current folder.
+- Archives: **Extract** (zip/tar/tgz/7z/rar via bsdtar, Expand-Archive
+  fallback) and **Compress → zip** (PowerShell Compress-Archive).
+- Copy/Cut/Paste (cross-drive moves handled), rename, delete, mkdir,
+  new file, copy-path, **Open terminal here**.
+- Deep link `#fx` or `#fx=C:\path` opens the explorer at that folder.
+- Server API: `base=@abs` unlocks absolute paths in `/api/files`,
+  `/api/file`, `/api/upload`, `/api/fileop` (new ops: `copy`, `move`,
+  `extract`, `zip`). Anyone reaching the UI already has full shell
+  access, so this exposes nothing new.
+
 ## Remote screen (Windows)
 
 The 🖥 button opens a live view of the host desktop. Tap = left click,

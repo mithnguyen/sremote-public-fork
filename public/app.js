@@ -233,6 +233,7 @@ function applyRoute() {
   if (!raw || !wsLoaded || !sessLoaded) return;  // retried when the missing list arrives
   const q = new URLSearchParams(raw);
   const sid = q.get("s"), wsId = q.get("ws");
+  if (q.has("fx")) openExplorer(q.get("fx") || undefined);
   if (sid) {
     const s = sessions.find((x) => x.id === sid);
     if (s) {
@@ -1091,7 +1092,8 @@ $("#scrim").onclick = () => {
 // ---------- keyboard shortcuts ----------
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
-    for (const m of ["#new-modal", "#picker", "#file-modal", "#snip-modal", "#copy-modal", "#settings-modal", "#palette", "#diff-modal"]) $(m).classList.add("hidden");
+    for (const m of ["#new-modal", "#picker", "#file-modal", "#snip-modal", "#copy-modal", "#settings-modal", "#palette", "#diff-modal", "#fx-modal"]) $(m).classList.add("hidden");
+    $("#fx-ctx")?.classList.add("hidden");
     closeTermSearch();
     return;
   }
@@ -1441,8 +1443,8 @@ function mdLite(src) {
   if (inCode) html += "</code></pre>";
   return html || '<p class="md-dim">(empty file)</p>';
 }
-async function openFile(rel, it) {
-  const url = `/api/file?base=${encodeURIComponent(fpRoot)}&path=${encodeURIComponent(rel)}`;
+async function openFile(rel, it, base = fpRoot) {
+  const url = `/api/file?base=${encodeURIComponent(base)}&path=${encodeURIComponent(rel)}`;
   $("#file-name").textContent = it.name;
   const dl = $("#file-dl");
   dl.href = url + "&dl=1";
@@ -1608,6 +1610,424 @@ $("#pk-newfolder").onclick = () => {
   };
   inp.onblur = () => row.remove();
 };
+
+// ---------- file explorer (home "File transfer") ----------
+// Full-filesystem explorer over base "@abs": browse drives, preview, download,
+// upload (button / drag-drop / paste), extract & create archives, rename,
+// delete, copy/cut/paste, open-terminal-here. All paths are absolute.
+const fxModal = $("#fx-modal"), fxMain = $("#fx-main"), fxCrumbs = $("#fx-crumbs"),
+      fxQuick = $("#fx-quick"), fxStatus = $("#fx-status"), fxSelbar = $("#fx-selbar"),
+      fxCtx = $("#fx-ctx"), fxDropEl = $("#fx-drop"), fxFilter = $("#fx-filter"),
+      fxProg = $("#fx-prog"), fxPasteBtn = $("#fx-paste");
+let fxPath = "", fxParent = null, fxHist = [""], fxHi = 0, fxItems = [], fxQuickItems = [];
+let fxSel = new Set(), fxSortKey = "", fxSortAsc = true, fxAnchor = -1;
+let fxClip = null, fxSuppressTap = false; // {op:"copy"|"move", paths:[abs...]}
+
+const ARCH_RE = /\.(zip|7z|rar|jar|war|tar|tgz|tbz2|txz|tar\.gz|tar\.bz2|tar\.xz|gz|bz2|xz|cab)$/i;
+const MEDIA_EXT = new Set(["mp3","wav","ogg","flac","mp4","mkv","avi","mov","webm"]);
+const EXEC_EXT = new Set(["exe","msi","bat","cmd","ps1","com","appx","msix"]);
+function fxJoin(dir, name) {
+  const sep = /[\\:]/.test(dir) ? "\\" : "/";
+  return dir.replace(/[\\/]+$/, "") + sep + name;
+}
+function fxIcon(it) {
+  if (it.drive) return driveSvg();
+  if (it.dir) return folderSvg(18);
+  const ext = (it.name.split(".").pop() || "").toLowerCase();
+  if (ARCH_RE.test(it.name))
+    return `<svg width="15" height="15" viewBox="0 0 20 20" fill="none"><rect x="3" y="4" width="14" height="13" rx="1.5" fill="#b48ad6"/><path d="M10 4v2m0 0v2h-1.5V6M10 8v2h1.5V8M10 10v1.5h-1.5V10M10 11.5V13h1.5v-1.5" stroke="#241733" stroke-width="1"/><rect x="8.5" y="13.5" width="3" height="2.5" rx=".5" fill="#241733"/></svg>`;
+  if (IMG_EXT.has(ext))
+    return `<svg width="15" height="15" viewBox="0 0 20 20" fill="none"><rect x="2.5" y="4" width="15" height="12" rx="1.5" fill="#4f8f6f"/><circle cx="6.8" cy="8" r="1.5" fill="#d9f2e4"/><path d="M4.5 15l4-4.2 3 3.1 2.4-2.4 2.6 2.6v1.4H4.5z" fill="#d9f2e4"/></svg>`;
+  if (MEDIA_EXT.has(ext))
+    return `<svg width="15" height="15" viewBox="0 0 20 20" fill="none"><rect x="2.5" y="4" width="15" height="12" rx="1.5" fill="#7a6fd0"/><path d="M8 7.5v5l4.5-2.5z" fill="#e7e5ff"/></svg>`;
+  if (EXEC_EXT.has(ext))
+    return `<svg width="15" height="15" viewBox="0 0 20 20" fill="none"><rect x="3" y="3" width="14" height="14" rx="2" fill="#5f7a94"/><path d="M6.5 6.5l3 3.5-3 3.5M10.5 13.5H14" stroke="#e3edf5" stroke-width="1.4" stroke-linecap="round"/></svg>`;
+  return fileSvg();
+}
+const fmtMtime = (t) => !t ? "" : new Date(t).toLocaleString(undefined,
+  { year: "2-digit", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+
+async function fxOp(op, p, extra = {}) {
+  const r = await fetch("/api/fileop", {
+    method: "POST", body: JSON.stringify({ base: "@abs", op, path: p, ...extra }),
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { toast(j.error || `${op} failed`, "err"); return null; }
+  return j;
+}
+function openExplorer(startPath) {
+  fxModal.classList.remove("hidden");
+  fxSel.clear(); fxFilter.value = "";
+  fetch("/api/browse?path=").then((r) => r.json()).then((j) => {
+    fxQuickItems = j.quickAccess || [];
+    renderFxQuick((j.items || []).filter((i) => i.drive));
+  }).catch(() => renderFxQuick([]));
+  fxHist = []; fxHi = -1;
+  fxGo(startPath ?? fxPath, true); // settle() pushes the resolved path into history
+}
+function closeExplorer() { fxModal.classList.add("hidden"); fxHideCtx(); }
+
+function fxGo(p, push = true) {
+  const settle = (path, items, parent) => {
+    fxPath = path; fxParent = parent; fxItems = items;
+    if (push) { fxHist = fxHist.slice(0, fxHi + 1); fxHist.push(path); fxHi++; }
+    fxSel.clear();
+    renderFx();
+  };
+  if (!p) { // "This PC": drives come from /api/browse (dirs-only endpoint)
+    fetch("/api/browse?path=").then((r) => r.json()).then((j) => {
+      fxQuickItems = j.quickAccess || fxQuickItems;
+      renderFxQuick((j.items || []).filter((i) => i.drive));
+      settle("", (j.items || []).filter((i) => i.drive)
+        .map((d) => ({ name: d.name, dir: true, drive: true, path: d.path, size: 0, mtime: 0 })), null);
+    }).catch(() => { fxMain.innerHTML = `<div class="pk-err">Can't list drives</div>`; });
+    return;
+  }
+  fetch(`/api/files?base=@abs&path=${encodeURIComponent(p)}`)
+    .then((r) => r.json().then((j) => ({ ok: r.ok, j })))
+    .then(({ ok, j }) => {
+      if (!ok) { fxMain.innerHTML = `<div class="pk-err">Can't open: ${esc(j?.error || "?")}</div>`; return; }
+      settle(j.path, j.items, j.parent);
+    })
+    .catch(() => { fxMain.innerHTML = `<div class="pk-err">Can't open ${esc(p)}</div>`; });
+}
+function renderFxQuick(drives) {
+  fxQuick.innerHTML = "";
+  const mk = (label, path, ico, sel) => {
+    const d = document.createElement("div");
+    d.className = "pk-quick-item" + (sel ? " sel" : "");
+    d.innerHTML = `${ico} ${esc(label)}`;
+    d.onclick = () => fxGo(path);
+    fxQuick.appendChild(d);
+  };
+  mk("This PC", "", driveSvg(), fxPath === "");
+  for (const q of fxQuickItems) mk(q.name, q.path, folderSvg(16), q.path === fxPath);
+  for (const w of workspaces) mk(w.name, w.path, folderSvg(16), w.path === fxPath);
+  for (const d of drives || []) mk(d.name, d.path, driveSvg(), d.path === fxPath);
+}
+function renderFx() {
+  // crumbs
+  fxCrumbs.innerHTML = "";
+  const pcCrumb = document.createElement("span");
+  pcCrumb.className = "pk-crumb"; pcCrumb.textContent = "This PC";
+  pcCrumb.onclick = () => fxGo("");
+  fxCrumbs.appendChild(pcCrumb);
+  if (fxPath) {
+    const parts = fxPath.replace(/[\\/]+$/, "").split(/[\\/]+/);
+    let acc = fxPath.startsWith("\\\\") ? "\\\\" : "";
+    parts.forEach((seg, i) => {
+      acc = i === 0 ? (/^[A-Z]:$/i.test(seg) ? seg + "\\" : acc + seg) : acc.replace(/\\$/, "") + "\\" + seg;
+      const sep = document.createElement("span"); sep.className = "pk-sep"; sep.textContent = "›";
+      const c = document.createElement("span"); c.className = "pk-crumb"; c.textContent = seg;
+      const t = acc; c.onclick = () => fxGo(t);
+      fxCrumbs.appendChild(sep); fxCrumbs.appendChild(c);
+    });
+  }
+  // sort header indicators
+  const FX_COL = { name: "Name", size: "Size", mtime: "Modified" };
+  for (const h of document.querySelectorAll("#fx-modal .fx-h"))
+    h.textContent = (FX_COL[h.dataset.s] || h.dataset.s) +
+      (fxSortKey === h.dataset.s ? (fxSortAsc ? " ▲" : " ▼") : "");
+  // list
+  fxMain.innerHTML = "";
+  const frag = document.createDocumentFragment();
+  if (fxParent !== null && fxParent !== undefined) {
+    const up = document.createElement("div");
+    up.className = "fx-item";
+    up.innerHTML = `<span class="fx-ico">${folderSvg(18)}</span><span class="fx-name">..</span>`;
+    up.onclick = () => fxGo(fxParent);
+    frag.appendChild(up);
+  }
+  const q = fxFilter.value.trim().toLowerCase();
+  let items = fxItems.filter((it) => !q || it.name.toLowerCase().includes(q));
+  if (fxSortKey) {
+    const f = { name: (a) => a.name.toLowerCase(), size: (a) => a.size, mtime: (a) => a.mtime }[fxSortKey];
+    items = [...items].sort((a, b) => (b.dir - a.dir) || (fxSortAsc ? 1 : -1) * (f(a) > f(b) ? 1 : f(a) < f(b) ? -1 : 0));
+  }
+  items.forEach((it, idx) => {
+    const d = document.createElement("div");
+    d.className = "fx-item" + (it.dir ? " dir" : "") + (fxSel.has(it.name) ? " sel" : "");
+    d.innerHTML = `<span class="fx-ico">${fxIcon(it)}</span>
+      <span class="fx-name" title="${esc(it.name)}">${esc(it.name)}</span>
+      <span class="fx-size">${it.dir ? "" : fmtSize(it.size)}</span>
+      <span class="fx-mtime">${fmtMtime(it.mtime)}</span>`;
+    const abs = it.drive ? it.path : (fxPath ? fxJoin(fxPath, it.name) : it.name);
+    d.dataset.abs = abs; d.dataset.name = it.name; d.dataset.idx = idx;
+    d.onclick = (e) => fxClickItem(e, d, it, abs, idx, items);
+    d.ondblclick = () => fxOpenItem(it, abs);
+    d.oncontextmenu = (e) => { e.preventDefault(); fxClickItem(e, d, it, abs, idx, items, true); fxShowCtx(e, it, abs); };
+    let lpT = null; // long-press = context menu on touch
+    d.addEventListener("touchstart", (e) => {
+      clearTimeout(lpT);
+      const t = e.touches[0];
+      lpT = setTimeout(() => {
+        lpT = null; fxSuppressTap = true;
+        try { navigator.vibrate?.(20); } catch {}
+        fxSel.add(it.name); renderFxSel();
+        fxShowCtx({ clientX: t.clientX, clientY: t.clientY }, it, abs);
+      }, 500);
+    }, { passive: true });
+    for (const ev of ["touchend", "touchmove", "touchcancel"])
+      d.addEventListener(ev, () => { if (lpT) { clearTimeout(lpT); lpT = null; } }, { passive: true });
+    frag.appendChild(d);
+  });
+  if (!items.length && fxPath) frag.appendChild(Object.assign(document.createElement("div"),
+    { className: "pk-err", textContent: q ? "No matches" : "Empty folder" }));
+  fxMain.appendChild(frag);
+  fxStatusUpdate();
+}
+function fxClickItem(e, d, it, abs, idx, items, viaCtx = false) {
+  if (fxSuppressTap && !viaCtx) { fxSuppressTap = false; return; } // long-press ate this tap
+  fxHideCtx();
+  if (isCoarse && !viaCtx) { fxOpenItem(it, abs); return; } // touch: tap = open
+  if (e.ctrlKey || e.metaKey) {
+    fxSel.has(it.name) ? fxSel.delete(it.name) : fxSel.add(it.name);
+    fxAnchor = idx;
+  } else if (e.shiftKey && fxAnchor >= 0) {
+    const [a, b2] = [Math.min(fxAnchor, idx), Math.max(fxAnchor, idx)];
+    fxSel = new Set(items.slice(a, b2 + 1).map((x) => x.name));
+  } else {
+    if (viaCtx && fxSel.has(it.name)) { /* right-click on selection keeps it */ }
+    else { fxSel = new Set([it.name]); fxAnchor = idx; }
+  }
+  renderFxSel();
+}
+function renderFxSel() {
+  fxMain.querySelectorAll(".fx-item[data-name]").forEach((el) =>
+    el.classList.toggle("sel", fxSel.has(el.dataset.name)));
+  fxStatusUpdate(); fxRenderSelbar();
+}
+function fxSelPaths() { return [...fxSel].map((n) => fxJoin(fxPath, n)); }
+function fxSelItems() { return [...fxSel].map((n) => fxItems.find((i) => i.name === n)).filter(Boolean); }
+function fxStatusUpdate() {
+  fxStatus.textContent = fxPath
+    ? `${fxItems.length} item${fxItems.length === 1 ? "" : "s"}${fxSel.size ? ` · ${fxSel.size} selected` : ""}`
+    : `${fxItems.length} drive${fxItems.length === 1 ? "" : "s"}`;
+  fxPasteBtn.disabled = !fxClip || !fxPath;
+  fxPasteBtn.textContent = fxClip ? `Paste (${fxClip.paths.length})` : "Paste";
+}
+function fxRenderSelbar() {
+  if (!fxSel.size) { fxSelbar.classList.add("hidden"); return; }
+  fxSelbar.classList.remove("hidden");
+  const one = fxSel.size === 1 ? fxSelItems()[0] : null;
+  const anyDir = fxSelItems().some((i) => i.dir);
+  const btn = (l, fn, title) => {
+    const b = document.createElement("button");
+    b.className = "mini-btn"; b.textContent = l; if (title) b.title = title;
+    b.onclick = fn; fxSelbar.appendChild(b); return b;
+  };
+  fxSelbar.innerHTML = "";
+  btn(one && one.dir ? "Open" : (one ? "Open / Preview" : "Open"), fxOpenSel);
+  btn(anyDir || fxSel.size > 1 ? "Download as zip" : "Download", fxDownloadSel);
+  if (one && !one.dir && ARCH_RE.test(one.name)) btn("Extract here", () => fxExtract(one));
+  btn("Compress → zip", fxZipSel);
+  btn("Copy", () => fxSetClip("copy")); btn("Cut", () => fxSetClip("move"));
+  if (one) btn("Rename", () => fxRename(one));
+  btn("Delete", fxDeleteSel);
+  if (one) btn("Copy path", () => { copyToClipboard(fxJoin(fxPath, one.name)); toast("Path copied"); });
+  btn("✕", () => { fxSel.clear(); renderFxSel(); }, "Clear selection");
+}
+function fxOpenSel() { const i = fxSelItems()[0]; if (i) fxOpenItem(i, fxJoin(fxPath, i.name)); }
+function fxOpenItem(it, abs) {
+  if (it.drive || it.dir) return fxGo(abs);
+  openFile(abs, it, "@abs"); // preview modal; Download button inside it too
+}
+// ---- selection ops ----
+function fxDl(href, name) { const a = document.createElement("a"); a.href = href; a.download = name || ""; a.click(); }
+async function fxDownloadSel() {
+  const sel = fxSelItems(); if (!sel.length) return;
+  const one = sel.length === 1 ? sel[0] : null;
+  if (one && !one.dir) {
+    fxDl(`/api/file?base=@abs&path=${encodeURIComponent(fxJoin(fxPath, one.name))}&dl=1`, one.name);
+    return;
+  }
+  toast("Creating archive…");
+  const paths = sel.map((i) => fxJoin(fxPath, i.name));
+  const j = sel.length > 1
+    ? await fxOp("zip", paths[0], { paths, dest: fxPath })
+    : await fxOp("zip", paths[0]);
+  if (j && j.zip) { fxDl(`/api/file?base=@abs&path=${encodeURIComponent(j.zip)}&dl=1`, j.zip.split(/[\\/]/).pop()); fxGo(fxPath, false); }
+}
+async function fxZipSel() {
+  const sel = fxSelItems(); if (!sel.length) return;
+  const paths = sel.map((i) => fxJoin(fxPath, i.name));
+  toast("Compressing…");
+  const j = sel.length > 1
+    ? await fxOp("zip", paths[0], { paths, dest: fxPath })
+    : await fxOp("zip", paths[0]);
+  if (j) { toast(`Created ${j.zip.split(/[\\/]/).pop()}`); fxGo(fxPath, false); }
+}
+async function fxExtract(it) {
+  toast("Extracting…");
+  const j = await fxOp("extract", fxJoin(fxPath, it.name));
+  if (j) { toast(`Extracted → ${j.dir.split(/[\\/]/).pop()}/`); fxGo(j.dir || fxPath); }
+}
+function fxSetClip(op) { fxClip = { op, paths: fxSelPaths() }; fxStatusUpdate(); toast(`${op === "copy" ? "Copied" : "Cut"} ${fxClip.paths.length} item(s)`); }
+async function fxPaste() {
+  if (!fxClip || !fxPath) return;
+  for (const p of fxClip.paths) {
+    const j = await fxOp(fxClip.op, p, { dest: fxPath });
+    if (!j) break;
+  }
+  if (fxClip.op === "move") fxClip = null;
+  fxGo(fxPath, false);
+}
+async function fxRename(it) {
+  const nn = prompt("Rename to:", it.name);
+  if (nn && nn.trim() && nn.trim() !== it.name &&
+      await fxOp("rename", fxJoin(fxPath, it.name), { name: nn.trim() })) {
+    toast("Renamed"); fxGo(fxPath, false);
+  }
+}
+async function fxDeleteSel() {
+  const sel = fxSelItems(); if (!sel.length) return;
+  if (!confirm(`Delete ${sel.length} item(s)${sel.some((i) => i.dir) ? " — folders are removed recursively" : ""}?`)) return;
+  for (const it of sel) { const j = await fxOp("delete", fxJoin(fxPath, it.name)); if (!j) break; }
+  fxSel.clear(); toast("Deleted"); fxGo(fxPath, false);
+}
+function fxTermHere(dir) {
+  closeExplorer();
+  enterWorkspace(null);
+  send({ type: "create", cwd: dir, name: dir.split(/[\\/]/).filter(Boolean).pop() || "terminal" });
+}
+// ---- context menu ----
+function fxHideCtx() { fxCtx.classList.add("hidden"); }
+function fxShowCtx(e, it, abs) {
+  const entries = [];
+  if (it) {
+    entries.push([it.dir || it.drive ? "Open" : "Open / Preview", () => fxOpenItem(it, abs)]);
+    if (!it.dir && !it.drive) entries.push(["Download", () => fxDl(`/api/file?base=@abs&path=${encodeURIComponent(abs)}&dl=1`, it.name)]);
+    if (it.dir) entries.push(["Open terminal here", () => fxTermHere(abs)]);
+    if (!it.dir && ARCH_RE.test(it.name)) entries.push(["Extract here", () => fxExtract(it)]);
+    entries.push(["Compress → zip", async () => {
+      toast("Compressing…");
+      const j = await fxOp("zip", abs);
+      if (j) { toast(`Created ${j.zip.split(/[\\/]/).pop()}`); fxGo(fxPath, false); }
+    }]);
+    entries.push(null);
+    entries.push(["Copy", () => { if (!fxSel.size) fxSel.add(it.name); fxSetClip("copy"); }]);
+    entries.push(["Cut", () => { if (!fxSel.size) fxSel.add(it.name); fxSetClip("move"); }]);
+    entries.push(["Rename", () => fxRename(it)]);
+    entries.push(["Copy path", () => { copyToClipboard(abs); toast("Path copied"); }]);
+    entries.push(null);
+    entries.push(["Delete", () => { if (!fxSel.has(it.name)) { fxSel = new Set([it.name]); } fxDeleteSel(); }]);
+  } else {
+    entries.push(["Paste" + (fxClip ? ` (${fxClip.paths.length})` : ""), () => fxClip && fxPaste()]);
+    entries.push(["Upload files…", () => $("#fx-file").click()]);
+    entries.push(["New folder", fxNewDir]);
+    entries.push(["New file", fxNewFile]);
+    entries.push(null);
+    entries.push(["Open terminal here", () => fxTermHere(fxPath)]);
+    entries.push(["Refresh", () => fxGo(fxPath, false)]);
+    entries.push(["Copy path", () => { copyToClipboard(fxPath); toast("Path copied"); }]);
+  }
+  fxCtx.innerHTML = "";
+  for (const en of entries) {
+    if (!en) { const s = document.createElement("div"); s.className = "ctx-sep"; fxCtx.appendChild(s); continue; }
+    const b = document.createElement("button");
+    b.className = "ctx-item"; b.textContent = en[0];
+    if (!it && en[0].startsWith("Paste") && !fxClip) b.disabled = true;
+    b.onclick = () => { fxHideCtx(); en[1](); };
+    fxCtx.appendChild(b);
+  }
+  fxCtx.classList.remove("hidden");
+  const r = fxCtx.getBoundingClientRect();
+  fxCtx.style.left = Math.min(e.clientX, innerWidth - r.width - 6) + "px";
+  fxCtx.style.top = Math.min(e.clientY, innerHeight - r.height - 6) + "px";
+}
+document.addEventListener("click", (e) => { if (!fxCtx.contains(e.target)) fxHideCtx(); });
+document.addEventListener("scroll", fxHideCtx, true);
+// background: click clears selection, right-click opens folder menu
+fxMain.onclick = (e) => { if (!e.target.closest(".fx-item")) { fxSel.clear(); renderFxSel(); } };
+fxMain.oncontextmenu = (e) => {
+  if (e.target.closest(".fx-item")) return; // item menu handled per-row
+  e.preventDefault(); fxHideCtx();
+  fxSel.clear(); renderFxSel();
+  fxShowCtx(e, null, null);
+};
+// ---- toolbar / footer wiring ----
+$("#fx-open").onclick = openExplorer;
+$("#fx-open").onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openExplorer(); } };
+$("#fx-close").onclick = closeExplorer;
+fxModal.onclick = (e) => { if (e.target === fxModal) closeExplorer(); };
+$("#fx-back").onclick = () => { if (fxHi > 0) { fxHi--; fxGo(fxHist[fxHi], false); } };
+$("#fx-fwd").onclick = () => { if (fxHi < fxHist.length - 1) { fxHi++; fxGo(fxHist[fxHi], false); } };
+$("#fx-up").onclick = () => fxGo(fxParent ?? "");
+$("#fx-home").onclick = () => fxGo("");
+$("#fx-refresh").onclick = () => fxGo(fxPath, false);
+fxFilter.oninput = () => renderFx();
+for (const h of document.querySelectorAll("#fx-modal .fx-h"))
+  h.onclick = () => { if (fxSortKey === h.dataset.s) fxSortAsc = !fxSortAsc; else { fxSortKey = h.dataset.s; fxSortAsc = true; } renderFx(); };
+$("#fx-upload").onclick = () => $("#fx-file").click();
+fxPasteBtn.onclick = fxPaste;
+async function fxNewDir() {
+  if (!fxPath) return;
+  const name = prompt("New folder name:"); if (!name || !name.trim()) return;
+  const j = await fxOp("mkdir", fxPath, { name: name.trim() });
+  if (j) { toast(`Created ${name.trim()}/`); fxGo(fxPath, false); }
+}
+async function fxNewFile() {
+  if (!fxPath) return;
+  const name = prompt("New file name:"); if (!name || !name.trim()) return;
+  const r = await fetch(`/api/upload?base=@abs&dir=${encodeURIComponent(fxPath)}&name=${encodeURIComponent(name.trim())}`, { method: "POST" });
+  const j = await r.json().catch(() => ({}));
+  if (r.ok) { toast(`Created ${name.trim()}`); fxGo(fxPath, false); } else toast(j.error || "create failed", "err");
+}
+$("#fx-newdir").onclick = fxNewDir;
+$("#fx-newfile").onclick = fxNewFile;
+// ---- upload (picker + drag-drop) with progress ----
+function fxProgSet(f) {
+  fxProg.classList.toggle("on", f > 0);
+  fxProg.firstElementChild.style.width = Math.round(f * 100) + "%";
+}
+function fxUploadOne(f) {
+  return new Promise((resolve) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `/api/upload?base=@abs&dir=${encodeURIComponent(fxPath)}&name=${encodeURIComponent(f.name)}`);
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable) fxProgSet(e.loaded / e.total); };
+    xhr.onload = () => {
+      fxProgSet(0);
+      const j = JSON.parse(xhr.responseText || "{}");
+      if (xhr.status < 300) toast(`Uploaded ${f.name}`); else toast(`Upload failed: ${j.error || xhr.status}`, "err");
+      resolve();
+    };
+    xhr.onerror = () => { fxProgSet(0); toast("Upload failed", "err"); resolve(); };
+    fxProgSet(0.01); xhr.send(f);
+  });
+}
+async function fxUploadFiles(fs) {
+  if (!fs.length) return;
+  if (!fxPath) return toast("Open a folder first", "err");
+  for (const f of fs) await fxUploadOne(f);
+  fxGo(fxPath, false);
+}
+$("#fx-file").addEventListener("change", (e) => { const fs = [...e.target.files]; e.target.value = ""; fxUploadFiles(fs); });
+const fxCard = document.querySelector(".fx-card");
+fxCard.addEventListener("dragover", (e) => {
+  if (!fxPath || ![...e.dataTransfer.types].includes("Files")) return;
+  e.preventDefault(); fxDropEl.classList.remove("hidden");
+});
+fxDropEl.addEventListener("dragleave", () => fxDropEl.classList.add("hidden"));
+fxDropEl.addEventListener("drop", (e) => {
+  e.preventDefault(); fxDropEl.classList.add("hidden");
+  fxUploadFiles([...e.dataTransfer.files]);
+});
+// keyboard inside explorer
+document.addEventListener("keydown", (e) => {
+  if (fxModal.classList.contains("hidden")) return;
+  const tag = (e.target.tagName || "").toLowerCase();
+  if (tag === "input" || tag === "textarea" || tag === "select") return;
+  if (e.key === "Delete") fxDeleteSel();
+  else if (e.key === "F2") { const i = fxSelItems()[0]; if (i) fxRename(i); }
+  else if (e.key === "Enter") fxOpenSel();
+  else if (e.key === "Backspace") { e.preventDefault(); fxGo(fxParent ?? ""); }
+  else if (e.ctrlKey && !e.shiftKey && !e.altKey) {
+    if (e.key === "a" || e.key === "A") { e.preventDefault(); fxSel = new Set(fxItems.map((i) => i.name)); renderFxSel(); }
+    else if (e.key === "c" || e.key === "C") { if (fxSel.size) fxSetClip("copy"); }
+    else if (e.key === "x" || e.key === "X") { if (fxSel.size) fxSetClip("move"); }
+    else if (e.key === "v" || e.key === "V") fxPaste();
+  }
+});
 
 // ---------- new session modal ----------
 const modal = $("#new-modal"), shellSel = $("#new-shell"), cwdIn = $("#new-cwd"), nameIn = $("#new-name");

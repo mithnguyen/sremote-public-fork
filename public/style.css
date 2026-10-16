@@ -228,6 +228,86 @@ body.disconnected #terms { opacity: .55; filter: saturate(.6); }
 .picker-foot button:disabled { opacity: .45; cursor: default; filter: none; }
 .picker-foot .btn { padding: 7px 14px; font-size: 12.5px; }
 
+/* ---------- file explorer (home File transfer) ---------- */
+.fx-open-card {
+  display: flex; align-items: center; gap: 14px;
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 12px;
+  padding: 15px 18px; margin-bottom: 18px; cursor: pointer;
+  transition: border-color .15s, transform .12s, background .15s;
+}
+.fx-open-card:hover { border-color: var(--border-hi); background: var(--bg3); transform: translateY(-1px); }
+.fx-open-card:active { transform: none; }
+.fx-open-ico {
+  width: 44px; height: 44px; border-radius: 11px; flex-shrink: 0;
+  background: rgba(88,166,255,.12); color: var(--accent);
+  display: flex; align-items: center; justify-content: center;
+}
+.fx-open-txt { flex: 1; min-width: 0; }
+.fx-open-title { font-weight: 700; font-size: 14px; }
+.fx-open-sub { font-size: 12px; color: var(--fg-dim); margin-top: 2px; }
+.fx-open-arrow { font-size: 24px; color: var(--fg-dim); }
+.fx-card { width: 900px; height: 580px; position: relative; }
+#fx-filter {
+  background: #1b1b1b; border: 1px solid #3a3a3a; border-radius: 5px;
+  color: var(--fg); padding: 4px 9px; font-size: 12px; width: 140px; margin: 0 4px;
+}
+#fx-filter:focus { border-color: var(--accent); outline: none; }
+.fx-mainwrap { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.fx-head {
+  display: flex; gap: 10px; padding: 5px 12px; flex-shrink: 0;
+  font-size: 11px; font-weight: 600; color: var(--fg-dim);
+  border-bottom: 1px solid #3a3a3a; user-select: none;
+}
+.fx-h { cursor: pointer; } .fx-h:hover { color: var(--fg); }
+.fx-h-name { flex: 1; } .fx-h-size { width: 84px; text-align: right; } .fx-h-mtime { width: 132px; text-align: right; }
+.fx-main { display: block; padding: 5px 7px; }
+.fx-item {
+  display: flex; align-items: center; gap: 9px; padding: 6px 9px;
+  border-radius: 5px; cursor: default; font-size: 12.5px; transition: background .1s;
+}
+.fx-item:hover { background: #333; }
+.fx-item.sel { background: #3d4a5c; }
+.fx-item .fx-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fx-item .fx-size { width: 84px; text-align: right; font-size: 11px; color: var(--fg-dim); font-variant-numeric: tabular-nums; flex-shrink: 0; }
+.fx-item .fx-mtime { width: 132px; text-align: right; font-size: 11px; color: var(--fg-dim); font-variant-numeric: tabular-nums; flex-shrink: 0; }
+.fx-foot {
+  display: flex; align-items: center; gap: 10px; padding: 10px 14px;
+  background: #2b2b2b; border-top: 1px solid #3a3a3a; font-size: 12px; color: var(--fg-dim);
+}
+.fx-foot-btns { display: flex; gap: 6px; margin-left: auto; }
+#fx-status { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#fx-prog { flex: 0 1 130px; height: 4px; border-radius: 2px; background: #1b1b1b; overflow: hidden; opacity: 0; transition: opacity .2s; }
+#fx-prog.on { opacity: 1; }
+#fx-prog i { display: block; height: 100%; width: 0; background: var(--accent); border-radius: 2px; transition: width .15s; }
+#fx-selbar {
+  display: flex; gap: 5px; flex-wrap: wrap; padding: 8px 12px;
+  background: #242424; border-top: 1px solid #3a3a3a;
+}
+.ctx {
+  position: fixed; z-index: 90; min-width: 190px; padding: 5px;
+  background: #26282e; border: 1px solid #454a55; border-radius: 9px;
+  box-shadow: 0 14px 40px rgba(0,0,0,.55); display: flex; flex-direction: column; gap: 1px;
+}
+.ctx-item {
+  display: block; width: 100%; text-align: left; padding: 7px 12px;
+  background: none; border: 0; color: var(--fg); font-size: 12.5px;
+  border-radius: 6px; cursor: pointer;
+}
+.ctx-item:hover:not(:disabled) { background: #3a4a63; }
+.ctx-item:disabled { opacity: .4; cursor: default; }
+.ctx-sep { height: 1px; background: #3a3a3a; margin: 4px 6px; }
+#fx-drop {
+  position: absolute; inset: 0; z-index: 40; display: flex; align-items: center; justify-content: center;
+  background: rgba(10,14,20,.72); border: 2px dashed var(--accent); border-radius: 10px;
+  color: var(--accent); font-size: 15px; font-weight: 600;
+}
+@media (max-width: 720px) {
+  .fx-card .fx-quick { display: none; }
+  .fx-item .fx-mtime, .fx-h-mtime { display: none; }
+  #fx-filter { width: 84px; }
+  .fx-item { padding: 9px 10px; }
+}
+
 /* ---------- keybar + typerow (touch/narrow) ---------- */
 #keybar, #typerow { display: none; }
 body.touch-ui #typerow, body.typebar #typerow {

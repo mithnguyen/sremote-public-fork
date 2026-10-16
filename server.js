@@ -8,7 +8,7 @@ const { spawn, execFile, execFileSync } = require("child_process");
 const net = require("net");
 const crypto = require("crypto");
 
-const PORT = 2209;
+const PORT = Number(process.env.PORT || process.env.SREMOTE_PORT || 2209);
 const IS_WIN = process.platform === "win32";
 const ROOT = __dirname;
 const PUBLIC = path.join(ROOT, "public");
@@ -398,6 +398,53 @@ async function apiGitDiff(res, root) {
   res.end(JSON.stringify({ stat, diff, truncated }));
 }
 
+// ---------- archive helpers (file explorer) ----------
+const psq = (s) => `'${String(s).replace(/'/g, "''")}'`;
+// unique-ify a would-be created path: foo.ext -> foo (1).ext / foo -> foo (1)
+function freshPath(want) {
+  if (!fs.existsSync(want)) return want;
+  const dir = path.dirname(want), ext = path.extname(want);
+  const stem = ext ? path.basename(want, ext) : path.basename(want);
+  for (let i = 1; i < 200; i++) {
+    const t = path.join(dir, `${stem} (${i})${ext}`);
+    if (!fs.existsSync(t)) return t;
+  }
+  return want + ".new";
+}
+// strip archive extension: foo.tar.gz -> foo, foo.zip -> foo
+function archiveStem(p) {
+  return path.basename(p).replace(/\.(tar\.(gz|bz2|xz|zst)|tgz|tbz2|txz|[a-z0-9]{1,5})$/i, "");
+}
+// extract archive into destDir. bsdtar (ships with Win10+/most linux) reads
+// zip/tar/gz/bz2/xz/7z; PowerShell Expand-Archive is the .zip fallback.
+function extractArchive(archive, destDir) {
+  fs.mkdirSync(destDir, { recursive: true });
+  try {
+    const r = execFileSync("tar", ["-xf", archive, "-C", destDir],
+      { timeout: 600000, stdio: ["ignore", "pipe", "pipe"] });
+    void r; return;
+  } catch (e) { if (!/\.zip$/i.test(archive)) throw new Error("extract failed (tar): " + (e.stderr || e.message)); }
+  execFileSync("powershell", ["-NoProfile", "-Command",
+    `Expand-Archive -LiteralPath ${psq(archive)} -DestinationPath ${psq(destDir)} -Force`],
+    { timeout: 600000, stdio: ["ignore", "pipe", "pipe"] });
+}
+// compress one or more paths into an archive next to destDir/name
+function zipInto(paths, destZip, baseDir) {
+  if (IS_WIN) {
+    const list = paths.map(psq).join(",");
+    execFileSync("powershell", ["-NoProfile", "-Command",
+      `Compress-Archive -LiteralPath ${list} -DestinationPath ${psq(destZip)} -Force`],
+      { timeout: 900000, stdio: ["ignore", "pipe", "pipe"] });
+  } else {
+    // GNU tar can't emit .zip — fall back to .tar.gz (destZip renamed by caller)
+    const tgz = destZip.replace(/\.zip$/i, "") + ".tar.gz";
+    execFileSync("tar", ["-czf", tgz, "-C", baseDir, ...paths.map((p) => path.basename(p))],
+      { timeout: 900000, stdio: ["ignore", "pipe", "pipe"] });
+    return tgz;
+  }
+  return destZip;
+}
+
 // ---------- HTTP ----------
 const MIME = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".json": "application/json", ".png": "image/png", ".svg": "image/svg+xml", ".woff2": "font/woff2" };
 
@@ -477,17 +524,24 @@ const server = http.createServer((req, res) => {
     state.workspaces.splice(i, 1); saveState();
     res.writeHead(200); return res.end();
   }
-  // file listing/download jailed under a base (workspace id or abs path)
+  // file listing/download jailed under a base (workspace id or abs path);
+  // base "@abs" = unrestricted absolute paths for the home file explorer —
+  // anyone who can reach this UI already has full shell access, so this
+  // widens nothing security-wise but unlocks the whole filesystem view.
+  const ABS = "@abs";
   const resolveBase = (b) => {
     if (!b) return null;
+    if (b === ABS) return ABS;
     if (b.startsWith("ws:")) { const w = workspaceById(b.slice(3)); return w ? w.path : null; }
     const p = path.resolve(b);
     return fs.existsSync(p) && fs.statSync(p).isDirectory() ? p : null;
   };
   const jail = (root, rel) => {
+    if (root === ABS) return path.resolve(String(rel || "."));
     const t = path.resolve(root, rel || ".");
     return t === root || t.startsWith(root + path.sep) ? t : null;
   };
+  const isFsRoot = (t) => path.parse(t).root === t; // C:\ or / — never op on it
   if (url.pathname === "/api/files" && req.method === "GET") {
     const root = resolveBase(url.searchParams.get("base"));
     if (!root) return jsonErr(res, 400, "bad base");
@@ -500,10 +554,17 @@ const server = http.createServer((req, res) => {
         return { name: e.name, dir: e.isDirectory(), size: st ? st.size : 0, mtime: st ? st.mtimeMs : 0 };
       });
       items.sort((a, b) => (b.dir - a.dir) || a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
-      const rel = path.relative(root, target) || "";
-      const parent = rel === "" ? null : path.dirname(rel) === "." ? "" : path.dirname(rel);
+      let rel, parent;
+      if (root === ABS) { // absolute-path mode: report real paths so the explorer can navigate
+        rel = target;
+        const dp = path.dirname(target);
+        parent = dp === target ? null : dp;
+      } else {
+        rel = path.relative(root, target) || "";
+        parent = rel === "" ? null : path.dirname(rel) === "." ? "" : path.dirname(rel);
+      }
       res.writeHead(200, { "Content-Type": "application/json" });
-      return res.end(JSON.stringify({ root, path: rel, parent, items }));
+      return res.end(JSON.stringify({ root: root === ABS ? "" : root, path: rel, parent, items, abs: root === ABS }));
     } catch (e) { return jsonErr(res, 403, e.code || "unreadable"); }
   }
   if (url.pathname === "/api/file" && req.method === "GET") {
@@ -568,7 +629,7 @@ const server = http.createServer((req, res) => {
     const out = fs.createWriteStream(dest);
     let size = 0;
     const fail = (code, msg) => { try { out.destroy(); fs.rmSync(dest, { force: true }); } catch {}; jsonErr(res, code, msg); };
-    req.on("data", (c) => { if ((size += c.length) > 100 * 1024 * 1024) req.destroy(); });
+    req.on("data", (c) => { if ((size += c.length) > 4 * 1024 * 1024 * 1024) req.destroy(); });
     req.on("error", () => fail(413, "too large"));
     req.pipe(out);
     out.on("error", (e) => fail(400, e.code || "write failed"));
@@ -592,8 +653,10 @@ const server = http.createServer((req, res) => {
       const okName = (n) => typeof n === "string" && /^[^\\/:*?"<>|]+$/.test(n.trim());
       const jailedChild = (parent, n) => {
         const t = path.join(parent, n.trim());
-        return t === root || t.startsWith(root + path.sep) ? t : null;
+        return root === ABS || t === root || t.startsWith(root + path.sep) ? t : null;
       };
+      if (root === ABS && isFsRoot(target) && b.op !== "mkdir")
+        return jsonErr(res, 400, "cannot operate on filesystem root");
       try {
         if (b.op === "rename") {
           if (target === root) return jsonErr(res, 400, "cannot rename base root");
@@ -609,6 +672,46 @@ const server = http.createServer((req, res) => {
           const dest = jailedChild(target, b.name);
           if (!dest) return jsonErr(res, 403, "outside jail");
           fs.mkdirSync(dest);
+        } else if (b.op === "copy" || b.op === "move") {
+          // dest = destination DIRECTORY (rel under base, or abs for @abs)
+          const destDir = jail(root, b.dest);
+          if (!destDir || !fs.existsSync(destDir) || !fs.statSync(destDir).isDirectory())
+            return jsonErr(res, 400, "bad dest dir");
+          const dest = freshPath(path.join(destDir, path.basename(target)));
+          if (b.op === "copy") fs.cpSync(target, dest, { recursive: true });
+          else try { fs.renameSync(target, dest); }
+          catch (e) { // cross-drive move: copy then remove
+            if (e.code !== "EXDEV") throw e;
+            fs.cpSync(target, dest, { recursive: true });
+            fs.rmSync(target, { recursive: true, force: true });
+          }
+        } else if (b.op === "extract") {
+          const destDir = freshPath(path.join(path.dirname(target), archiveStem(target)));
+          extractArchive(target, destDir);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ dir: destDir }));
+        } else if (b.op === "zip") {
+          // one path -> <name>.zip next to it; several -> files-<ts>.zip in b.dest dir
+          const many = Array.isArray(b.paths) && b.paths.length > 1;
+          if (many) {
+            const destDir = jail(root, b.dest);
+            if (!destDir || !fs.statSync(destDir).isDirectory()) return jsonErr(res, 400, "bad dest dir");
+            const srcs = [];
+            for (const p of b.paths) {
+              const t = jail(root, p);
+              if (!t || isFsRoot(t)) return jsonErr(res, 403, "outside jail");
+              srcs.push(t);
+            }
+            const ts = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "");
+            const dest = freshPath(path.join(destDir, `files-${ts}.zip`));
+            const made = zipInto(srcs, dest, destDir);
+            res.writeHead(200, { "Content-Type": "application/json" });
+            return res.end(JSON.stringify({ zip: made }));
+          }
+          const dest = freshPath(path.join(path.dirname(target), path.basename(target) + ".zip"));
+          const made = zipInto([target], dest, path.dirname(target));
+          res.writeHead(200, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ zip: made }));
         } else return jsonErr(res, 400, "bad op");
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end("{}");

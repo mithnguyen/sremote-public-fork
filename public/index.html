@@ -12,7 +12,7 @@
 <meta name="theme-color" content="#070a10">
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="stylesheet" href="/vendor/xterm.css">
-<link rel="stylesheet" href="/style.css?v=21">
+<link rel="stylesheet" href="/style.css?v=22">
 </head>
 <body>
 
@@ -32,6 +32,15 @@
     </div>
     <div class="home-label">WORKSPACES</div>
     <div id="ws-grid"></div>
+    <div class="home-label">FILES</div>
+    <div id="fx-open" class="fx-open-card" role="button" tabindex="0" title="Open file explorer">
+      <div class="fx-open-ico"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5M12 3v12"/><path d="M7 22h10" opacity=".45"/></svg></div>
+      <div class="fx-open-txt">
+        <div class="fx-open-title">File transfer</div>
+        <div class="fx-open-sub">Browse, upload, download, extract — full file explorer on this machine</div>
+      </div>
+      <span class="fx-open-arrow">›</span>
+    </div>
     <div id="peers-sec" class="hidden">
       <div class="home-label">MACHINES</div>
       <div id="home-peers"></div>
@@ -168,6 +177,46 @@
     </div>
   </div>
 </div>
+<!-- ============ file explorer (home File transfer) ============ -->
+<div id="fx-modal" class="modal hidden">
+  <div class="picker-card fx-card">
+    <div class="picker-toolbar">
+      <button id="fx-back" class="pk-btn" title="Back">‹</button>
+      <button id="fx-fwd" class="pk-btn" title="Forward">›</button>
+      <button id="fx-up" class="pk-btn" title="Up">↑</button>
+      <button id="fx-home" class="pk-btn" title="This PC">⌂</button>
+      <div id="fx-crumbs" class="pk-crumbs"></div>
+      <input id="fx-filter" placeholder="Filter…" autocomplete="off" spellcheck="false">
+      <button id="fx-refresh" class="pk-btn" title="Refresh">⟳</button>
+      <button id="fx-close" class="pk-btn" title="Close (Esc)">×</button>
+    </div>
+    <div class="picker-body">
+      <div class="picker-quick fx-quick" id="fx-quick"></div>
+      <div class="fx-mainwrap">
+        <div class="fx-head">
+          <span class="fx-h fx-h-name" data-s="name">Name</span>
+          <span class="fx-h fx-h-size" data-s="size">Size</span>
+          <span class="fx-h fx-h-mtime" data-s="mtime">Modified</span>
+        </div>
+        <div class="picker-main fx-main" id="fx-main"></div>
+      </div>
+    </div>
+    <div id="fx-selbar" class="hidden"></div>
+    <div class="fx-foot">
+      <span id="fx-status"></span>
+      <span id="fx-prog"><i></i></span>
+      <div class="fx-foot-btns">
+        <button id="fx-paste" class="mini-btn" disabled title="Paste (Ctrl+V)">Paste</button>
+        <button id="fx-upload" class="mini-btn" title="Upload files here">Upload</button>
+        <button id="fx-newfile" class="mini-btn" title="New file">+ File</button>
+        <button id="fx-newdir" class="mini-btn" title="New folder">+ Folder</button>
+      </div>
+    </div>
+    <div id="fx-drop" class="hidden"><span>Drop files to upload here</span></div>
+  </div>
+  <input type="file" id="fx-file" hidden multiple>
+</div>
+<div id="fx-ctx" class="ctx hidden"></div>
 <div id="file-modal" class="modal hidden">
   <div class="file-card">
     <div class="file-head">
@@ -293,6 +342,6 @@
 <script src="/vendor/addon-search.js"></script>
 <script src="/vendor/addon-web-links.js"></script>
 <script src="/vendor/addon-unicode11.js"></script>
-<script src="/app.js?v=29"></script>
+<script src="/app.js?v=30"></script>
 </body>
 </html>
