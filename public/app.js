@@ -969,7 +969,7 @@ function askText(title, value, okLabel = "Save") {
     const done = (v) => { m.classList.add("hidden"); inp.onkeydown = null; res(v); };
     $("#ask-ok").onclick = () => done(inp.value.trim() || null);
     $("#ask-cancel").onclick = () => done(null);
-    m.onclick = (e) => e.target === m && done(null);
+    m.onclick = (e) => { if (e.target === m) done(null); };
     inp.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") done(inp.value.trim() || null); if (e.key === "Escape") done(null); };
   });
 }
@@ -1362,7 +1362,7 @@ $("#snip-save").onclick = () => {
   renderSnips(); toast("Snippet saved");
 };
 $("#snip-close").onclick = () => snipModal.classList.add("hidden");
-snipModal.onclick = (e) => e.target === snipModal && snipModal.classList.add("hidden");
+snipModal.onclick = (e) => { if (e.target === snipModal) snipModal.classList.add("hidden"); };
 
 // ---------- notifications (bell / idle) ----------
 const notifiedSess = new Set(); // sessions with an unread notification (drives .tab.bell)
@@ -1455,7 +1455,7 @@ $("#copy-ok").onclick = async () => {
   } catch { toast("Copy failed", "err"); }
 };
 $("#copy-cancel").onclick = () => copyModal.classList.add("hidden");
-copyModal.onclick = (e) => e.target === copyModal && copyModal.classList.add("hidden");
+copyModal.onclick = (e) => { if (e.target === copyModal) copyModal.classList.add("hidden"); };
 
 // ---------- drag & drop upload ----------
 const dropzone = $("#dropzone"), mainEl = $("#main");
@@ -1614,7 +1614,7 @@ palIn.addEventListener("keydown", (e) => {
   else if (e.key === "Escape") { e.preventDefault(); closePalette(); }
   e.stopPropagation();
 });
-palette.onclick = (e) => e.target === palette && closePalette();
+palette.onclick = (e) => { if (e.target === palette) closePalette(); };
 $("#pal-btn").onclick = openPalette;
 
 // ---------- terminal search (Ctrl+F) ----------
@@ -1692,7 +1692,7 @@ function openSettings() {
 $("#set-btn").onclick = openSettings;
 $("#side-set").onclick = openSettings;
 $("#set-close").onclick = () => setModal.classList.add("hidden");
-setModal.onclick = (e) => e.target === setModal && setModal.classList.add("hidden");
+setModal.onclick = (e) => { if (e.target === setModal) setModal.classList.add("hidden"); };
 $("#set-font-m").onclick = () => setFont(fontSize - 1);
 $("#set-font-p").onclick = () => setFont(fontSize + 1);
 for (const b of document.querySelectorAll("#set-theme button")) {
@@ -1899,7 +1899,7 @@ async function openFile(rel, it, base = fpRoot) {
   } catch (e) { preEl.textContent = "Failed to load: " + e.message; }
 }
 $("#file-close").onclick = () => fileModal.classList.add("hidden");
-fileModal.onclick = (e) => e.target === fileModal && fileModal.classList.add("hidden");
+fileModal.onclick = (e) => { if (e.target === fileModal) fileModal.classList.add("hidden"); };
 
 // ---------- git diff viewer ----------
 const diffModal = $("#diff-modal");
@@ -1926,7 +1926,7 @@ async function openDiff() {
 $("#fp-diff").onclick = openDiff;
 $("#diff-refresh").onclick = openDiff;
 $("#diff-close").onclick = () => diffModal.classList.add("hidden");
-diffModal.onclick = (e) => e.target === diffModal && diffModal.classList.add("hidden");
+diffModal.onclick = (e) => { if (e.target === diffModal) diffModal.classList.add("hidden"); };
 
 // ---------- folder picker (Win11 style) ----------
 const picker = $("#picker"), pkMain = $("#pk-main"), pkCrumbs = $("#pk-crumbs"),
@@ -2008,7 +2008,7 @@ $("#pk-up").onclick = () => {
 };
 $("#pk-refresh").onclick = () => pkNavigate(pkPath, false);
 $("#pk-cancel").onclick = () => picker.classList.add("hidden");
-picker.onclick = (e) => e.target === picker && picker.classList.add("hidden");
+picker.onclick = (e) => { if (e.target === picker) picker.classList.add("hidden"); };
 $("#pk-ok").onclick = () => {
   if (!pkSelectedPath || !pkCb) return;
   const cb = pkCb; pkCb = null;
@@ -2470,7 +2470,7 @@ function closeModal() { modal.classList.add("hidden"); cwdIn.disabled = false; }
 $("#new-btn").onclick = openModal;
 $("#empty-new").onclick = openModal;
 $("#new-cancel").onclick = closeModal;
-modal.onclick = (e) => e.target === modal && closeModal();
+modal.onclick = (e) => { if (e.target === modal) closeModal(); };
 $("#new-browse").onclick = () => openPicker((p) => { cwdIn.value = p; });
 $("#new-ok").onclick = () => {
   send({
