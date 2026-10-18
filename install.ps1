@@ -11,9 +11,15 @@ $nodeVer  = 'v22.11.0'   # fallback portable Node LTS - only fetched when no nod
 # ---------- 0. locate install dir(s) -------------------------------------------
 # Older installers could miss the real install dir and drop a fresh copy into
 # %LOCALAPPDATA% - hiding workspaces (state.json) and live sessions (broker).
-# Instead of returning the first match we collect EVERY dir that looks like an
-# install; if several exist we ask the user: fresh install, or fix + install
-# into the original dir (re-attaches sessions, merges state, removes dupes).
+# Instead of returning the first match we collect EVERY dir that is an install;
+# if several exist we ask the user: fresh install, or fix + install into the
+# original dir (re-attaches sessions, merges state, stops the duplicate).
+#
+# SAFETY: this script never deletes a user folder. A source checkout, fork or
+# copy of the project looks exactly like an install, so a dir found only by
+# scanning the disk must carry the marker file every install gets (or be the
+# installer's own default dir); git checkouts are never picked up by a scan.
+$marker = '.sremote-install'
 $script:runningRoot    = $null   # dir the :2209 server reports (api/info.root)
 $script:liveBrokerDir  = $null   # dir whose session-host.js broker is alive
 $candSet = [ordered]@{}
@@ -27,7 +33,9 @@ function Test-BroadDir($d) {
                "$env:USERPROFILE\Desktop", "$env:USERPROFILE\Documents", "$env:USERPROFILE\Downloads")
     return ($broad -contains $d)
 }
-function Add-InstallCandidate([string]$d) {
+# -Scan = found by looking around the disk (no running/registered S-remote points
+# at it): only accepted with the install marker, or as the installer's default dir
+function Add-InstallCandidate([string]$d, [switch]$Scan) {
     if (-not $d) { return }
     try {
         # an S-remote install always has server.js AND our payload markers -
@@ -39,6 +47,11 @@ function Add-InstallCandidate([string]$d) {
         if (-not $ours) { return }
         $p = [IO.Path]::GetFullPath($d).TrimEnd('\')
         if (Test-BroadDir $p) { return }
+        if ($Scan) {
+            if (Test-Path (Join-Path $p '.git')) { return }          # someone's checkout of the source
+            $isDefault = $p -match '\\AppData\\Local\\S-remote$'
+            if (-not $isDefault -and -not (Test-Path (Join-Path $p $marker))) { return }
+        }
         if (-not $candSet.Contains($p)) { $candSet[$p] = $true }
     } catch {}
 }
@@ -117,11 +130,12 @@ foreach ($rk in 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run',
 
 # f) every top-level dir on every drive, plus one level deeper for dirs whose
 #    name mentions "remote" (covers C:\sremote, D:\tools\sremote, D:\x\my-remote)
+#    - marker required (see SAFETY above)
 foreach ($drv in (Get-PSDrive -PSProvider FileSystem)) {
     Get-ChildItem $drv.Root -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object {
-        Add-InstallCandidate $_.FullName
+        Add-InstallCandidate $_.FullName -Scan
         Get-ChildItem $_.FullName -Directory -Force -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match 'remote' } | ForEach-Object { Add-InstallCandidate $_.FullName }
+            Where-Object { $_.Name -match 'remote' } | ForEach-Object { Add-InstallCandidate $_.FullName -Scan }
     }
 }
 
@@ -133,7 +147,7 @@ Get-ChildItem "$env:SystemDrive\Users" -Directory -Force -ErrorAction SilentlyCo
     $u = $_.FullName
     $well += "$u\AppData\Local\S-remote", "$u\S-remote", "$u\sremote", "$u\Desktop\S-remote", "$u\Documents\S-remote"
 }
-foreach ($d in $well) { Add-InstallCandidate $d }
+foreach ($d in $well) { Add-InstallCandidate $d -Scan }
 
 $cands    = @($candSet.Keys)
 $dir      = $null
@@ -166,7 +180,8 @@ if ($env:SREMOTE_DIR) {
     Write-Host "    [1] Fresh install into $freshDir"
     Write-Host "        (other installs stay on disk untouched; their workspaces are NOT migrated)"
     Write-Host "    [2] FIX bad update + install into $primary"
-    Write-Host "        (keeps workspaces, re-attaches live sessions, then removes duplicate dirs)"
+    Write-Host "        (keeps workspaces, re-attaches live sessions, stops the other copies;"
+    Write-Host "         their folders are left on disk - delete them yourself if unneeded)"
     $choice = $env:SREMOTE_MODE
     if (-not $choice) { try { $choice = Read-Host "    Choice [1/2, default 2]" } catch { $choice = '2' } }
     if ($choice -eq '1' -or $choice -match '^(fresh|new)$') { $dir = $freshDir }
@@ -177,7 +192,7 @@ if ($env:SREMOTE_PROBE_ONLY) {
     Write-Host "==> probe only"
     foreach ($d in $cands) { Write-Host ("    cand: {0}  ({1})" -f $d, (Get-DirInfo $d)) }
     Write-Host "    chosen dir: $dir"
-    Write-Host "    fixDupes:   $($fixDupes -join '; ')"
+    Write-Host "    fixDupes:   $($fixDupes -join '; ')  (stopped, never deleted)"
     return
 }
 
@@ -194,7 +209,8 @@ if (-not (Test-Node)) {
     $nx = Join-Path $env:TEMP ("node-x-" + [guid]::NewGuid())
     Expand-Archive $nz $nx -Force
     New-Item -ItemType Directory -Force $dir | Out-Null
-    if (Test-Path "$dir\node") { Remove-Item "$dir\node" -Recurse -Force }
+    if (Test-Path "$dir\node\node.exe") { Remove-Item "$dir\node" -Recurse -Force }   # only our old portable node
+    elseif (Test-Path "$dir\node") { throw "$dir\node exists and is not a portable Node - refusing to replace it" }
     Move-Item (Join-Path $nx "node-$nodeVer-win-x64") "$dir\node"
     Remove-Item $nz, $nx -Recurse -Force -ErrorAction SilentlyContinue
     $env:Path = "$dir\node;$env:Path"
@@ -257,6 +273,8 @@ foreach ($f in 'server.js','package.json','package-lock.json','install.bat','sta
     if (Test-Path $p) { Copy-Item $p $dir -Recurse -Force }
 }
 Remove-Item $zip, $tmp -Recurse -Force -ErrorAction SilentlyContinue
+# marker: lets later installers recognise this dir as an install (never a user project)
+try { Set-Content (Join-Path $dir $marker) "S-remote install dir ($relTag). Used by install.ps1 to recognise this folder - keep it." -Encoding ascii } catch {}
 
 # ---------- 3. dependencies ----------------------------------------------------
 Push-Location $dir
@@ -348,23 +366,25 @@ try {
     Write-Host ""
     Write-Host "OK - S-remote $(if($update){'updated'}else{'installed'}) (server starting...)"
 }
-# ---------- 6. remove duplicate install dirs (fix mode) -------------------------
-# kill only processes that ARE the duplicate install - an exe inside the dir or
-# our own scripts run from it - plus their whole descendant tree (covers PTY
-# shells under the broker). Anything merely mentioning the path (editors with a
-# file open there, terminals cd'd into it) is left alone.
+# ---------- 6. retire duplicate installs (fix mode) -----------------------------
+# Stop the S-remote processes running FROM a duplicate dir - an exe inside the
+# dir or our own scripts run from it - plus their descendant tree (PTY shells
+# under its broker). Anything merely mentioning the path (editors with a file
+# open there, terminals cd'd into it) is left alone. The folder itself is NEVER
+# deleted: a wrong guess must not be able to destroy someone's files.
+$leftOver = @()
 foreach ($dupe in $fixDupes) {
     if ([IO.Path]::GetFullPath($dupe) -eq [IO.Path]::GetFullPath($dir)) { continue }
-    if (Test-BroadDir $dupe) { Write-Host "    SKIP cleaning $dupe - dir too broad, refusing"; continue }
-    Write-Host "    removing duplicate install: $dupe"
+    if (Test-BroadDir $dupe) { continue }
+    Write-Host "    stopping duplicate install: $dupe"
     $esc = [regex]::Escape($dupe.TrimEnd('\'))
-    $ourFiles = '(server\.js|agent[\\/][^"\\'']*\.(js|exe|ps1)|start\.(cmd|bat)|install\.(bat|ps1)|SremoteTray\.exe|ScreenPro\.exe)'
+    $ourFiles = '(server\.js|agent[\\/][^"\\'']*\.(js|exe|ps1)|start\.(cmd|bat)|SremoteTray\.exe|ScreenPro\.exe)'
     $procs  = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue
     $byPpid = @{}
     foreach ($p in $procs) { $byPpid[$p.ParentProcessId] += @($p.ProcessId) }
     $kill = @{}; $queue = New-Object System.Collections.Queue
     foreach ($p in $procs) {
-        $seed = ($p.ExecutablePath -and $p.ExecutablePath -match "^$esc[\\/]") -or
+        $seed = ($p.ExecutablePath -and $p.ExecutablePath -match "^$esc[\\/](node|agent)[\\/]") -or
                 ($p.CommandLine -and $p.CommandLine -match "$esc[\\/]$ourFiles")
         if ($seed -and -not $kill.ContainsKey($p.ProcessId)) { $kill[$p.ProcessId] = $true; $queue.Enqueue($p.ProcessId) }
     }
@@ -375,10 +395,13 @@ foreach ($dupe in $fixDupes) {
         }
     }
     foreach ($k in $kill.Keys) { Stop-Process -Id $k -Force -ErrorAction SilentlyContinue }
-    Start-Sleep -Seconds 1
-    try { Remove-Item $dupe -Recurse -Force -ErrorAction Stop
-          Write-Host "    removed $dupe" }
-    catch { Write-Host "    WARN: could not fully remove $dupe - delete it manually after a reboot" }
+    $leftOver += $dupe
+}
+if ($leftOver.Count) {
+    Write-Host ""
+    Write-Host "    Other S-remote copies were stopped but NOT deleted:"
+    foreach ($d in $leftOver) { Write-Host "       $d" }
+    Write-Host "    Check them and delete manually if you don't need them."
 }
 
 if ($relTag) { Write-Host "    Install complete - version $relTag" }

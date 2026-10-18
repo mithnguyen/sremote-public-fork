@@ -3,8 +3,8 @@
 # Repairs machines where an old installer missed the original install dir
 # (e.g. C:\sremote) and did a fresh install into %LOCALAPPDATA% - wiping the
 # visible workspaces. This script updates the ORIGINAL dir in place (keeping
-# its state.json and re-attaching its live session broker), then removes the
-# duplicate install dir the bad update created.
+# its state.json and re-attaching its live session broker) and stops the
+# duplicate install the bad update created. It never deletes a folder.
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
@@ -19,7 +19,10 @@ Write-Host "    current install: $cur"
 
 # ---------- find the ORIGINAL install dir (has state.json / live broker) -------
 $found = @{}
-function Add-Found([string]$d) {
+# -Scan = found only by looking around the disk: a checkout, fork or copy of the
+# project looks just like an install, so require the install marker (or the
+# installer's default dir) and never accept a git checkout
+function Add-Found([string]$d, [switch]$Scan) {
     if (-not $d) { return }
     try {
         # must look like an S-remote install, not just any dir with state.json
@@ -28,7 +31,13 @@ function Add-Found([string]$d) {
                 (Test-Path (Join-Path $d 'agent\session-host.js')) -or
                 (Test-Path (Join-Path $d 'public\app.js')) -or
                 (Test-Path (Join-Path $d 'install.ps1'))
-        if ($ours) { $found[[IO.Path]::GetFullPath($d).TrimEnd('\')] = $true }
+        if (-not $ours) { return }
+        $p = [IO.Path]::GetFullPath($d).TrimEnd('\')
+        if ($Scan) {
+            if (Test-Path (Join-Path $p '.git')) { return }
+            if (-not ($p -match '\\AppData\\Local\\S-remote$') -and -not (Test-Path (Join-Path $p '.sremote-install'))) { return }
+        }
+        $found[$p] = $true
     } catch {}
 }
 function Get-PathFromCmd([string]$raw) {
@@ -48,9 +57,9 @@ function Add-ExeParent($m) {
 # 1) drive scan: top-level dirs, plus one level deeper for *remote*-named dirs
 foreach ($drv in (Get-PSDrive -PSProvider FileSystem)) {
     Get-ChildItem $drv.Root -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object {
-        Add-Found $_.FullName
+        Add-Found $_.FullName -Scan
         Get-ChildItem $_.FullName -Directory -Force -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match 'remote' } | ForEach-Object { Add-Found $_.FullName }
+            Where-Object { $_.Name -match 'remote' } | ForEach-Object { Add-Found $_.FullName -Scan }
     }
 }
 # 2) well-known spots - current user AND every profile under <sysdrive>\Users
@@ -60,7 +69,7 @@ Get-ChildItem "$env:SystemDrive\Users" -Directory -Force -ErrorAction SilentlyCo
     $u = $_.FullName
     $well += "$u\AppData\Local\S-remote", "$u\S-remote", "$u\sremote", "$u\Desktop\S-remote", "$u\Documents\S-remote"
 }
-foreach ($d in $well) { Add-Found $d }
+foreach ($d in $well) { Add-Found $d -Scan }
 # 3) autostart: scheduled task actions + Run keys (env vars expanded, args ok)
 try { foreach ($a in (Get-ScheduledTask -TaskName 'S-remote' -ErrorAction Stop).Actions) {
           Add-ExeParent (Get-PathFromCmd $a.Execute)
@@ -102,7 +111,9 @@ Write-Host "       (server re-attaches its session broker -> workspaces + live s
 $env:SREMOTE_DIR = $target
 Invoke-Expression (Invoke-RestMethod 'https://raw.githubusercontent.com/thsangyk-oss/sremote/main/install.ps1')
 
-# ---------- remove the duplicate dir the bad update created ---------------------
+# ---------- stop the duplicate install the bad update created -------------------
+# only its own S-remote processes (exe inside it / our scripts run from it) and
+# their descendants; the folder is left on disk - never deleted
 function Test-BroadDir($d) {
     try { $d = [IO.Path]::GetFullPath($d).TrimEnd('\') } catch { return $true }
     $broad = @($env:SystemDrive.TrimEnd('\'), "$env:SystemDrive\Users", $env:USERPROFILE.TrimEnd('\'),
@@ -110,23 +121,17 @@ function Test-BroadDir($d) {
                "$env:USERPROFILE\Desktop", "$env:USERPROFILE\Documents", "$env:USERPROFILE\Downloads")
     return ($broad -contains $d)
 }
-if ([IO.Path]::GetFullPath($cur) -ne [IO.Path]::GetFullPath($target) -and (Test-Path $cur)) {
-    if (Test-BroadDir $cur) {
-        Write-Host ""
-        Write-Host "    SKIP removing $cur - dir too broad, refusing to touch it"
-    } else {
+if ([IO.Path]::GetFullPath($cur) -ne [IO.Path]::GetFullPath($target) -and (Test-Path $cur) -and -not (Test-BroadDir $cur)) {
     Write-Host ""
-    Write-Host "==> removing duplicate install at $cur"
-    # kill only processes that ARE that install (exe inside it or our scripts run
-    # from it) plus their descendants - never anything that merely names the path
+    Write-Host "==> stopping duplicate install at $cur"
     $esc = [regex]::Escape($cur.TrimEnd('\'))
-    $ourFiles = '(server\.js|agent[\\/][^"\\'']*\.(js|exe|ps1)|start\.(cmd|bat)|install\.(bat|ps1)|SremoteTray\.exe|ScreenPro\.exe)'
+    $ourFiles = '(server\.js|agent[\\/][^"\\'']*\.(js|exe|ps1)|start\.(cmd|bat)|SremoteTray\.exe|ScreenPro\.exe)'
     $procs  = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue
     $byPpid = @{}
     foreach ($p in $procs) { $byPpid[$p.ParentProcessId] += @($p.ProcessId) }
     $kill = @{}; $queue = New-Object System.Collections.Queue
     foreach ($p in $procs) {
-        $seed = ($p.ExecutablePath -and $p.ExecutablePath -match "^$esc[\\/]") -or
+        $seed = ($p.ExecutablePath -and $p.ExecutablePath -match "^$esc[\\/](node|agent)[\\/]") -or
                 ($p.CommandLine -and $p.CommandLine -match "$esc[\\/]$ourFiles")
         if ($seed -and -not $kill.ContainsKey($p.ProcessId)) { $kill[$p.ProcessId] = $true; $queue.Enqueue($p.ProcessId) }
     }
@@ -137,11 +142,7 @@ if ([IO.Path]::GetFullPath($cur) -ne [IO.Path]::GetFullPath($target) -and (Test-
         }
     }
     foreach ($k in $kill.Keys) { Stop-Process -Id $k -Force -ErrorAction SilentlyContinue }
-    Start-Sleep -Seconds 1
-    try { Remove-Item $cur -Recurse -Force -ErrorAction Stop
-          Write-Host "    removed $cur" }
-    catch { Write-Host "    WARN: could not fully remove $cur - delete it manually after a reboot" }
-    }
+    Write-Host "    left on disk (NOT deleted): $cur - delete it yourself if you don't need it"
 }
 
 Write-Host ""

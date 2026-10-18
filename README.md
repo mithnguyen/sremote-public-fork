@@ -34,15 +34,23 @@ dir (e.g. a bad update dropped a copy into `%LOCALAPPDATA%`), it asks:
   untouched, their workspaces are **not** migrated
 - `[2]` fix + install into the original dir — keeps workspaces,
   re-attaches live sessions, merges newer state from the duplicate,
-  then removes the duplicate dirs *(default)*
+  then stops the duplicate *(default)*
 
 Pre-answer non-interactively with `$env:SREMOTE_MODE = 'fresh'` or `'fix'`.
+
+**The installer never deletes folders.** Duplicates are only stopped and
+listed for you to remove by hand. A dir counts as an install only when a
+running / registered S-remote points at it (server, session broker, tray,
+autostart task or Run key), or — for dirs found by scanning the disk — when
+it carries the `.sremote-install` marker every install writes (or is the
+default `%LOCALAPPDATA%\S-remote`). Source checkouts (`.git`), forks and
+copies of the project are never picked up by the scan.
 
 **Workspaces gone after updating to v1.10.x or older?** Those installers
 could miss a custom install dir (e.g. `C:\sremote`) and do a fresh
 install under `%LOCALAPPDATA%` — your old install (workspaces + live
 sessions) is still on disk. Run this to update the original dir in
-place and remove the duplicate:
+place and stop the duplicate (its folder is left for you to delete):
 
 ```powershell
 irm https://raw.githubusercontent.com/thsangyk-oss/sremote/main/fix-state.ps1 | iex
