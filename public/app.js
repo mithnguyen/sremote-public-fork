@@ -425,7 +425,18 @@ function ensurePane(id) {
     if (!dy) return;
     tAcc += dy / linePx();
     const n = Math.trunc(tAcc);
-    if (n) { tAcc -= n; term.scrollLines(n); }
+    if (!n) return;
+    tAcc -= n;
+    // fullscreen TUIs (Claude Code: alt screen + mouse tracking) scroll
+    // themselves on wheel — our scrollback only holds stale redraw frames.
+    // Synthesize wheel events so xterm forwards them to the app.
+    if (term.modes.mouseTrackingMode !== "none" || term.buffer.active.type === "alternate") {
+      for (let i = Math.abs(n); i--;)
+        scrEl().dispatchEvent(new WheelEvent("wheel", {
+          deltaY: Math.sign(n), deltaMode: WheelEvent.DOM_DELTA_LINE,
+          clientX: t.clientX, clientY: t.clientY, bubbles: true, cancelable: true,
+        }));
+    } else term.scrollLines(n);
   }, { passive: true });
   const endTouch = () => {
     tY = null; clearLp();

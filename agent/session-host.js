@@ -61,6 +61,26 @@ function cleanEnv() {
 const sessions = new Map(); // id -> {id,name,shell,cwd,workspace,createdAt,exited,proc,scrollback,sbDirty}
 const RESTORE_MARK = "\r\n\x1b[90m── session restored ──\x1b[0m\r\n";
 const sbFile = (id) => path.join(SB_DIR, `${id}.bin`);
+// DEC private modes a replay must get right. The scrollback is a 256KB tail,
+// so the toggles that switched them on (Claude Code: alt screen + mouse
+// tracking, sent once at startup) are often cut off — track them live.
+const ALT_MODES = ["1049", "1047", "47"];
+const MOUSE_MODES = ["1000", "1002", "1003", "1005", "1006", "1015"];
+const MODE_RE = /\x1b\[\?([\d;]+)([hl])/g;
+function trackModes(modes, d) {
+  for (const m of d.matchAll(MODE_RE))
+    for (const p of m[1].split(";")) if (ALT_MODES.includes(p) || MOUSE_MODES.includes(p)) modes[p] = m[2] === "h";
+}
+function replayData(s) {
+  let data = s.scrollback.toString("utf8");
+  const cur = s.modes || {}, curAlt = ALT_MODES.some((p) => cur[p]);
+  const end = {}; trackModes(end, data);
+  const toggled = ALT_MODES.some((p) => p in end), endAlt = ALT_MODES.some((p) => end[p]);
+  if (!toggled && curAlt) data = "\x1b[?1049h" + data; // whole tail was drawn on the alt screen
+  else if (toggled && endAlt !== curAlt) data += curAlt ? "\x1b[?1049h" : "\x1b[?1049l"; // e.g. respawned
+  for (const p of MOUSE_MODES) data += `\x1b[?${p}${cur[p] ? "h" : "l"}`;
+  return data;
+}
 
 function persist() {
   const list = [...sessions.values()].map((s) => ({
@@ -88,7 +108,9 @@ function spawnProc(s) {
     env: cleanEnv(),
   });
   s.exited = false;
+  s.modes = {};
   s.proc.onData((d) => {
+    trackModes(s.modes, d);
     s.scrollback = Buffer.concat([s.scrollback, Buffer.from(d, "utf8")]).subarray(-SCROLLBACK_MAX);
     s.sbDirty = true;
     bcast({ op: "out", id: s.id, data: d });
@@ -142,7 +164,7 @@ function attach(m, conn) {
   }
   conn.write(JSON.stringify({
     op: "attached", id: m.id, tok: m.tok, exited: s.exited,
-    data: s.scrollback.toString("utf8"),
+    data: replayData(s),
   }) + "\n");
 }
 
