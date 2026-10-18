@@ -28,6 +28,7 @@ let cur = { x: 0.5, y: 0.5, vis: false, id: 0 };
 const shapes = new Map();             // id -> {url, w, h, hx, hy}
 let mouseInside = false;
 let rtt = 0, autoQ = 70;
+let rotCss = false, rotLocked = false;  // forced landscape: CSS-rotated page / Orientation Lock
 
 // ---------- small ui helpers ----------
 const msgBox = $("#msg"), msgT = $("#msg-t"), msgAct = $("#msg-act");
@@ -216,12 +217,22 @@ function adapt() {
 }
 
 // ---------- layout / view transform ----------
-let fitS = 1;
+let fitS = 1, baseH = 0, kbWas = false, nativeKb = 0, vvKb = 0;
+// soft keyboard up? (app: native shift; browsers: visual viewport or a shrunken stage while typing)
+function kbActive(sh) {
+  if (!TOUCH || rotCss) return false;
+  return nativeKb > 0 || vvKb > 60 || (document.activeElement === kbd && baseH - sh > 100);
+}
 function layout() {
   const sw = stage.clientWidth, sh = stage.clientHeight;
   const fw = cv.width || cap.w, fh = cv.height || cap.h;
-  fitS = Math.min(sw / fw, sh / fh) || 1;
+  const kbA = kbActive(sh);
+  if (!kbA) baseH = sh;
+  // with the keyboard up keep the picture's size (fit to the full height) instead of shrinking it
+  fitS = Math.min(sw / fw, (kbA ? Math.max(sh, baseH) : sh) / fh) || 1;
   const s = fitS * view.z, dw = fw * s, dh = fh * s;
+  if (kbA && !kbWas && dh > sh) view.py = sh * 0.42 - cur.y * dh;    // keyboard just opened: the input point (pointer) stays visible
+  kbWas = kbA;
   // keep the picture covering the stage when zoomed in; centered otherwise
   const minX = Math.min(0, sw - dw), minY = Math.min(0, sh - dh);
   view.px = dw <= sw ? (sw - dw) / 2 : Math.max(minX, Math.min(0, view.px));
@@ -235,17 +246,18 @@ function rect() {
   const fw = cv.width, fh = cv.height, s = fitS * view.z;
   return { left: view.px, top: view.py, width: fw * s, height: fh * s };
 }
-// client coords -> fraction of the remote screen
-function frac(cx, cy) {
-  const r = rect(), sr = stage.getBoundingClientRect();
+// event -> page-local coords (the CSS-rotated landscape turns the page 90° clockwise)
+function loc(e) { return rotCss ? { x: e.clientY, y: innerWidth - e.clientX } : { x: e.clientX, y: e.clientY }; }
+// page-local coords -> fraction of the remote screen
+function frac(lx, ly) {
+  const r = rect();
   return {
-    x: Math.min(1, Math.max(0, (cx - sr.left - r.left) / r.width)),
-    y: Math.min(1, Math.max(0, (cy - sr.top - r.top) / r.height)),
+    x: Math.min(1, Math.max(0, (lx - stage.offsetLeft - r.left) / r.width)),
+    y: Math.min(1, Math.max(0, (ly - stage.offsetTop - r.top) / r.height)),
   };
 }
-function zoomAt(z, cx, cy) {
-  const sr = stage.getBoundingClientRect();
-  const ox = cx - sr.left, oy = cy - sr.top;
+function zoomAt(z, lx, ly) {
+  const ox = lx - stage.offsetLeft, oy = ly - stage.offsetTop;
   const nz = Math.max(1, Math.min(6, z));
   const k = nz / view.z;
   view.px = ox - (ox - view.px) * k; view.py = oy - (oy - view.py) * k;
@@ -258,8 +270,9 @@ addEventListener("resize", () => { layout(); clearTimeout(resizeT); resizeT = se
 
 // keep the remote cursor in view while zoomed (trackpad drives the cursor, not the view)
 function follow() {
-  if (view.z <= 1.01 || !TOUCH) return;
+  if (!TOUCH) return;
   const r = rect(), sw = stage.clientWidth, sh = stage.clientHeight, m = 60;
+  if (r.width <= sw + 1 && r.height <= sh + 1) return;              // whole picture visible
   const x = r.left + cur.x * r.width, y = r.top + cur.y * r.height;
   let dx = 0, dy = 0;
   if (x < m) dx = m - x; else if (x > sw - m) dx = sw - m - x;
@@ -345,10 +358,11 @@ stage.addEventListener("pointerdown", (e) => {
   if (!gotFrame) return;
   hidePops();
   stage.focus({ preventScroll: true });
+  const L = loc(e);
   if (e.pointerType === "mouse" || e.pointerType === "pen" && !TOUCH) {
     e.preventDefault();
     stage.setPointerCapture(e.pointerId);
-    const p = frac(e.clientX, e.clientY);
+    const p = frac(L.x, L.y);
     flushMove();
     if (sticky.size) stickyDown();
     scr({ op: "down", b: BTN[e.button] || "l", ...p });
@@ -356,33 +370,34 @@ stage.addEventListener("pointerdown", (e) => {
   }
   e.preventDefault();
   stage.setPointerCapture(e.pointerId);
-  pts.set(e.pointerId, { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, t0: performance.now() });
-  touchStart(e);
+  pts.set(e.pointerId, { x: L.x, y: L.y, x0: L.x, y0: L.y, t0: performance.now() });
+  touchStart(L);
 });
 stage.addEventListener("pointermove", (e) => {
   if (e.pointerType === "mouse" || e.pointerType === "pen" && !TOUCH) {
     if (!gotFrame) return;
     const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
-    const last = evs[evs.length - 1] || e;
-    queueMove(frac(last.clientX, last.clientY));
+    const last = loc(evs[evs.length - 1] || e);
+    queueMove(frac(last.x, last.y));
     return;
   }
   const p = pts.get(e.pointerId);
   if (!p) return;
-  const px = p.x, py = p.y;
-  p.x = e.clientX; p.y = e.clientY;
-  touchMove(e, e.clientX - px, e.clientY - py);
+  const L = loc(e), px = p.x, py = p.y;
+  p.x = L.x; p.y = L.y;
+  touchMove(L, L.x - px, L.y - py);
 });
 function pointerEnd(e) {
   if (e.pointerType === "mouse" || e.pointerType === "pen" && !TOUCH) {
     if (!gotFrame) return;
     flushMove();
-    scr({ op: "up", b: BTN[e.button] || "l", ...frac(e.clientX, e.clientY) });
+    const L = loc(e);
+    scr({ op: "up", b: BTN[e.button] || "l", ...frac(L.x, L.y) });
     stickyRelease();
     return;
   }
   if (!pts.has(e.pointerId)) return;
-  touchEnd(e, e.type === "pointercancel");
+  touchEnd(loc(e), e.type === "pointercancel");
   pts.delete(e.pointerId);
 }
 stage.addEventListener("pointerup", pointerEnd);
@@ -397,7 +412,7 @@ stage.addEventListener("wheel", (e) => {
   if (!gotFrame) return;
   const k = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? 800 : 1;
   wheelAcc.dy += -e.deltaY * k * 1.2; wheelAcc.dx += e.deltaX * k * 1.2;
-  wheelAcc.p = frac(e.clientX, e.clientY);
+  const L = loc(e); wheelAcc.p = frac(L.x, L.y);
   if (!wheelRaf) wheelRaf = requestAnimationFrame(() => {
     wheelRaf = 0;
     const dy = Math.round(wheelAcc.dy), dx = Math.round(wheelAcc.dx);
@@ -427,8 +442,8 @@ function touchStart(e) {
   const n = pts.size;
   if (n === 1) {
     const now = performance.now();
-    const dbl = now - lastTap.t < 320 && Math.hypot(e.clientX - lastTap.x, e.clientY - lastTap.y) < 40;
-    g = { kind: "one", t0: now, moved: false, drag: false, maxN: 1, x0: e.clientX, y0: e.clientY };
+    const dbl = now - lastTap.t < 320 && Math.hypot(e.x - lastTap.x, e.y - lastTap.y) < 40;
+    g = { kind: "one", t0: now, moved: false, drag: false, maxN: 1, x0: e.x, y0: e.y };
     if (mode === "trackpad" && dbl && pro) {         // double-tap-and-hold → drag
       g.drag = true; if (sticky.size) stickyDown(); scr({ op: "down", b: "l" });
     }
@@ -450,7 +465,7 @@ function touchMove(e, dx, dy) {
   if (!g) return;
   const n = pts.size;
   if (g.kind === "one" && n === 1) {
-    if (!g.moved && Math.hypot(e.clientX - g.x0, e.clientY - g.y0) > SLOP) {
+    if (!g.moved && Math.hypot(e.x - g.x0, e.y - g.y0) > SLOP) {
       g.moved = true; clearTimeout(g.longT);
       if (mode === "direct" && !g.right) {           // direct drag = left drag from the touch point
         g.drag = true; scr({ op: "move", ...frac(g.x0, g.y0) }); if (sticky.size) stickyDown(); scr({ op: "down", b: "l", ...frac(g.x0, g.y0) });
@@ -470,7 +485,7 @@ function touchMove(e, dx, dy) {
         predictUntil = performance.now() + 250; placeCursor(); follow();
       }
     } else if (g.drag || mode === "direct") {
-      queueMove(frac(e.clientX, e.clientY));
+      queueMove(frac(e.x, e.y));
     }
     return;
   }
@@ -519,14 +534,14 @@ function touchEnd(e, cancel) {
   if (g.kind === "one") {
     flushMove();
     if (g.drag) {
-      scr(mode === "direct" ? { op: "up", b: "l", ...frac(e.clientX, e.clientY) } : { op: "up", b: "l" });
+      scr(mode === "direct" ? { op: "up", b: "l", ...frac(e.x, e.y) } : { op: "up", b: "l" });
       stickyRelease();
     } else if (!g.moved && !g.right && dur < 600) {
       if (sticky.size) stickyDown();
       if (mode === "trackpad" && pro) scr({ op: "click", b: "l" });
-      else { const p = frac(e.clientX, e.clientY); scr(pro ? { op: "click", b: "l", ...p } : { op: "click", btn: "l", ...p }); }
+      else { const p = frac(e.x, e.y); scr(pro ? { op: "click", b: "l", ...p } : { op: "click", btn: "l", ...p }); }
       stickyRelease();
-      lastTap = { t: now, x: e.clientX, y: e.clientY };
+      lastTap = { t: now, x: e.x, y: e.y };
     }
   }
   g = null;
@@ -754,14 +769,12 @@ const more = $("#more");
 $("#b-more").onclick = (e) => {
   e.stopPropagation();
   if (!more.classList.contains("hidden")) return hidePops();
-  const r = $("#b-more").getBoundingClientRect();
-  more.classList.remove("hidden");
-  more.style.top = r.bottom + 8 + "px";
-  more.style.left = Math.max(8, Math.min(innerWidth - more.offsetWidth - 8, r.right - more.offsetWidth)) + "px";
+  more.classList.remove("hidden"); showBar();
 };
 function hidePops() { more.classList.add("hidden"); }
 document.addEventListener("pointerdown", (e) => { if (!e.target.closest("#more, #b-more")) hidePops(); });
 more.onclick = (e) => {
+  e.stopPropagation();
   const b = e.target.closest("button"); if (!b) return;
   hidePops();
   switch (b.dataset.act) {
@@ -829,16 +842,69 @@ document.addEventListener("visibilitychange", () => {
 });
 let wakeLock = null;
 async function wake() { try { if (navigator.wakeLock && !wakeLock) { wakeLock = await navigator.wakeLock.request("screen"); wakeLock.addEventListener("release", () => { wakeLock = null; }); } } catch {} }
-// soft keyboard: shrink the stage so the picture stays above it
+// soft keyboard. Android app: the native layer shifts the whole page up by the
+// keyboard height and reports it in window.__nativeKb — the visible band is then
+// [kb, innerHeight], so the stage starts at --kbtop. Browsers: --kb from visualViewport.
+Object.defineProperty(window, "__nativeKb", {
+  configurable: true,
+  get() { return nativeKb; },
+  set(v) {
+    nativeKb = Math.max(0, +v || 0);
+    document.documentElement.style.setProperty("--kbtop", nativeKb + "px");
+    document.documentElement.style.setProperty("--nkb", nativeKb + "px");   // rotated layout
+    requestAnimationFrame(layout);
+  },
+});
 if (window.visualViewport) {
   const vv = window.visualViewport;
   const onVV = () => {
     const kb = Math.max(0, innerHeight - vv.height - vv.offsetTop);
-    document.documentElement.style.setProperty("--kb", (kb > 60 && !(window.__nativeKb > 0) ? kb : 0) + "px");
+    vvKb = kb > 60 && !(nativeKb > 0) ? kb : 0;
+    document.documentElement.style.setProperty("--kb", vvKb + "px");
     layout();
   };
   vv.addEventListener("resize", onVV); vv.addEventListener("scroll", onVV);
 }
+kbd.addEventListener("focus", () => setTimeout(layout, 350));
+kbd.addEventListener("blur", () => setTimeout(layout, 350));
+
+// ---------- rotate (forced, not sensor based) ----------
+// Browsers: real landscape via Orientation Lock (needs fullscreen). Where that's
+// unavailable (Android app WebView, iOS) the page itself is laid out landscape
+// and turned 90° with CSS.
+function setRotCss(on) {
+  rotCss = on; LS.set("rot", on);
+  const root = document.documentElement;
+  root.style.setProperty("--vw", innerWidth + "px"); root.style.setProperty("--vh", innerHeight + "px");
+  root.classList.toggle("rot", on);
+  $("#b-rot").classList.toggle("on", on || rotLocked);
+  view.z = 1; requestAnimationFrame(layout);
+}
+addEventListener("resize", () => {
+  if (!rotCss) return;
+  const root = document.documentElement;
+  root.style.setProperty("--vw", innerWidth + "px"); root.style.setProperty("--vh", innerHeight + "px");
+});
+$("#b-rot").onclick = async () => {
+  if (rotCss) return setRotCss(false);
+  const lock = screen.orientation && screen.orientation.lock;
+  if (lock && !IN_APP) {
+    try {
+      if (rotLocked) {
+        await screen.orientation.lock("portrait");
+        rotLocked = false; $("#b-rot").classList.remove("on"); return;
+      }
+      if (!document.fullscreenElement) await document.documentElement.requestFullscreen({ navigationUI: "hide" });
+      await screen.orientation.lock("landscape");
+      rotLocked = true; $("#b-rot").classList.add("on"); return;
+    } catch {}
+  }
+  setRotCss(true);
+};
+document.addEventListener("fullscreenchange", () => {
+  if (!document.fullscreenElement && rotLocked) { rotLocked = false; $("#b-rot").classList.remove("on"); }
+});
+if (TOUCH && LS.get("rot", false) && innerHeight > innerWidth) setRotCss(true);
 addEventListener("beforeunload", () => { releaseAll(); unsubscribe(); });
 
 fetch("/api/info").then((r) => r.json()).then((i) => {
