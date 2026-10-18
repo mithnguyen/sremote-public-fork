@@ -173,65 +173,62 @@ right-click context menu, drag-drop upload.
 
 ## Remote screen (Windows)
 
-The 🖥 button opens a live view of the host desktop. Tap = left click,
-long-press or the **R-clk** button = right click, drag = mouse drag,
-two-finger swipe / wheel = scroll, **⌨** = type text and keys
-(Esc / Tab / Win-menu shortcuts).
+The 🖥 button (or **Remote screen** on the home page) opens the host
+desktop in its own tab — `screen.html`; inside the Android app it opens in
+place and Back returns. AnyDesk/RustDesk-style control:
 
-Frames are JPEG captures pushed over `/ws` (`type:"screen"`) by a
-PowerShell agent (`agent/screen-agent.ps1`, GDI+ `CopyFromScreen` +
-`SendKeys`/`mouse_event` for input — no dependencies). The agent is
-spawned on first subscriber and killed 30 s after the last one leaves;
-access stays tailnet/localhost-only like everything else. ~5 fps at
-your viewport width is the practical rate — enough to watch and click
-GUI apps, not a video streamer. UAC/secure-desktop prompts can't be
-captured or clicked (Windows security boundary).
+- **Desktop**: mouse and keyboard go straight to the host (real key
+  down/up, every button, wheel incl. horizontal). The local pointer takes
+  the shape of the host cursor. **Fullscreen** uses Keyboard Lock so Win,
+  Alt+Tab and Esc reach the host (hold Esc to leave).
+- **Phone / tablet — Trackpad mode** (default): drag one finger to move the
+  pointer, tap = click, double-tap-and-hold or hold = drag, two-finger
+  tap = right click, two-finger drag = scroll, pinch = zoom (the view
+  follows the pointer), three-finger tap = keyboard.
+  **Touch mode**: tap exactly where you point, hold = right click.
+- **Keyboard** on phones uses a hidden field, so IME / autocorrect /
+  Vietnamese input work; the keys panel adds sticky Ctrl/Alt/Shift/Win
+  (double-tap = lock), Esc/Tab/arrows/F-keys and shortcuts.
+- **Clipboard** both ways, also over plain `http://` on the tailnet:
+  Ctrl+V pastes this device's clipboard on the host (via the browser's
+  paste event); text copied on the host offers a one-tap Copy, and the
+  clipboard panel can set the host clipboard or type text.
+- Toolbar: monitor picker (multi-monitor, or all screens), quality
+  (Auto / High / Balanced / Low data), live stats (resolution, fps,
+  bandwidth, latency), block host input, refresh, Task Manager, Win+L.
 
-### Pro mode
+### Native agent
 
-The **PRO** toggle in the screen window switches to a native push-mode
-agent (`agent/screen-pro/ScreenPro.cs`). On first use it offers to
-install the extension: the host compiles the C# source locally with the
-`csc.exe` that ships with .NET Framework — **no download, ~20 KB exe**.
+`agent/screen-pro/ScreenPro.cs` is compiled on the host with the `csc.exe`
+that ships with .NET Framework (no download, ~30 KB exe). The server builds
+it automatically the first time the screen is opened and again whenever the
+source changes (`ScreenPro.ver` holds the source hash).
 
-- **DXGI Desktop Duplication** (GPU-side, event-driven): frames are
-  pushed only when the screen actually changes — idle desktop ≈ zero
-  traffic, changes appear instantly. Falls back to GDI polling when
-  duplication isn't available (multi-monitor: dxgi covers the primary
-  display, bitblt covers the full virtual screen).
-- **64 px tile diffing**: only changed tiles are JPEG-encoded and sent
-  as one binary ws frame — ~1 KB per typical update vs ~50 KB full JPEG.
-- Binary ws transport (no base64), cursor drawn into each frame, same
-  input path. Practical rate ~15 fps, API: same `type:"screen"` ops with
-  `pro:true`; frames arrive as binary `ws` messages instead of JSON.
-- `GET /api/screen-pro` → install status, `POST /api/screen-pro` →
-  compile `ScreenPro.cs` → `ScreenPro.exe`. The exe is gitignored;
-  reinstall is a one-click action per host.
-- If DXGI returns all-black frames (driver quirk), the agent detects it
-  and falls back to GDI capture automatically — the full virtual screen
-  is then streamed via the same tile pipeline.
+- Capture: **DXGI Desktop Duplication** of the chosen monitor (event
+  driven, idle desktop ≈ zero traffic); GDI BitBlt for "all screens", when
+  duplication is unavailable, or when a driver returns all-black frames.
+  UAC / lock screen interrupts DXGI — the agent falls back and retries.
+  DPI aware, so scaled (125 %/150 %) displays click exactly.
+- **64 px tile diffing**, dirty tiles merged into row runs and JPEG
+  encoded; tiles sent blurry (low quality) are re-sent sharp once the
+  screen settles.
+- **Flow control**: every frame costs a credit; the server grants credits
+  as viewers ack frames (max 2 in flight), so a slow link never queues old
+  frames — changes coalesce and latency stays low.
+- The cursor is not baked into frames: position (60 Hz) and shape go out
+  as JSON and the viewer draws it locally.
+- Input via `SendInput` (absolute virtual-desktop mouse, vk + scan code
+  keys, Unicode text). `BlockInput` needs the elevated task (`elevate.ps1`).
+  `Ctrl+Alt+Del` and secure-desktop prompts are not reachable (Windows
+  security boundary — same as RustDesk without its service).
+- Fallback: when the agent can't be built, the page uses the PowerShell
+  agent (`agent/screen-agent.ps1`, GDI+ shots + SendKeys) in basic mode.
 
-**Pro control (AnyDesk/RustDesk-style):**
-
-- **Real keyboard**: the canvas captures `keydown`/`keyup` → `SendInput`
-  with true key down/up — holding keys, modifier combos, F-keys, Win key
-  all work. Focus the canvas (tap/click it) to capture keys; clicking
-  outside releases them.
-- **Unicode typing**: `type` op uses `KEYEVENTF_UNICODE` — Vietnamese
-  and non-Latin input work, unlike SendKeys.
-- **Clipboard sync**: host clipboard changes are pushed to the client
-  automatically; `Ctrl+V` on the canvas (or the ⧉Paste button) sets the
-  host clipboard first, then pastes — ordered over the same channel.
-- **Mouse**: left/middle/right/X1/X2 buttons — right-click and the
-  context menu work directly on the canvas, aux buttons via `auxclick`.
-- **Shortcut buttons** in the ⌨ panel: Alt+Tab, Alt+F4, Task Manager,
-  Win, Win+D, Win+E, PrtSc. `Ctrl+Alt+Del` is not possible — the secure
-  attention sequence requires a Windows service (same limit RustDesk has
-  without its service).
-- **⛔ button**: `BlockInput` on the host — freezes ALL input (local and
-  injected); remote becomes view-only until toggled off. Auto-releases
-  when the session/agent stops.
-- **⛶ fullscreen** toggle.
+WebSocket protocol: `{type:"screen", pro:true, op}` with `sub {flow,w,q,fps,mon}`
+/ `unsub` / `ack` / `config` / `mon` / `refresh` and input ops `move`, `mrel`,
+`down`/`up`/`click {b}`, `wheel {dy,dx}`, `kd`/`ku {vk}`, `combo`, `type`,
+`clip`, `block`; frames arrive as binary `F` messages, `info` / `cur` /
+`shape` / `clip` as JSON.
 
 ## HTTP API
 
@@ -265,7 +262,9 @@ when the base is a git repo, and files there are swept after 7 days.
 |---|---|
 | `server.js` | HTTP + WS + PTY host (single file) |
 | `public/` | Web UI — home, terminal tabs, file explorer, remote screen |
-| `agent/screen-agent.ps1` | Windows screen capture + input agent (spawned on demand) |
+| `public/screen.html` | Remote screen page (own tab) — `screen.js` / `screen.css` |
+| `agent/screen-pro/ScreenPro.cs` | Native screen agent (DXGI capture, SendInput), built on the host on first use |
+| `agent/screen-agent.ps1` | Windows screen capture + input agent (spawned on demand) | — basic-mode fallback
 | `agent/session-host.js` | Session broker daemon — owns PTYs + scrollback across server restarts |
 | `state.json` | Persisted workspaces + session records (auto-created) |
 | `data/scrollback/` | Per-session scrollback buffers (auto-created) |

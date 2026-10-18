@@ -5,7 +5,13 @@ const $ = (s) => document.querySelector(s);
 
 // ---------- state ----------
 let ws = null, wsAlive = false, reconnectTimer = null;
-let onScreenMsg = () => {}, onScreenBin = () => {}, screenResub = () => {}; // wired inside the init IIFE below
+let onScreenMsg = () => {}, onScreenBin = () => {}, screenResub = () => {}; // remote screen lives in screen.html now
+// remote screen: its own page — new tab in a browser, in place inside the Android app (Back returns)
+function openScreen() {
+  if (/SRemoteApp/.test(navigator.userAgent)) { location.href = "/screen.html"; return; }
+  const w = window.open("/screen.html", "sremote-screen");
+  if (!w) location.href = "/screen.html";   // popup blocked
+}
 let sessions = [];          // all server sessions
 let workspaces = [];        // persisted workspace folders
 let activeId = null;
@@ -331,7 +337,6 @@ window.addEventListener("popstate", () => {
   if (skipPop) { skipPop = false; return; }
   const open = [...document.querySelectorAll(".modal:not(.hidden), #palette:not(.hidden)")];
   if (open.length || !popMenu.classList.contains("hidden") || !pjPop.classList.contains("hidden")) {
-    if (!$("#screen-modal").classList.contains("hidden")) $("#scr-close").click();
     for (const m of open) m.classList.add("hidden");
     hideMenu(); hidePjPop();
     if (view === "work") { try { history.pushState({ sr: "work" }, ""); } catch {} } // stay in the terminal
@@ -358,7 +363,7 @@ function applyRoute() {
   } else if (wsId && wsById(wsId)) {
     enterWorkspace(wsId);
   }
-  if (q.has("screen")) $("#screen-btn").click();
+  if (q.has("screen")) openScreen();
   history.replaceState(history.state, "", location.pathname + location.search);
 }
 window.addEventListener("hashchange", applyRoute);
@@ -873,7 +878,8 @@ document.addEventListener("keydown", (e) => {
   else if (e.key.length === 1 && /\S/.test(e.key)) homeQ.focus(); // the char then lands in the input
 });
 $("#home-add").onclick = addProject;
-$("#tool-screen").onclick = () => $("#screen-btn").click();
+$("#tool-screen").onclick = openScreen;
+$("#screen-btn").onclick = openScreen;
 function addProject() {
   openPicker((p) => {
     fetch("/api/workspaces", { method: "POST", body: JSON.stringify({ path: p }) })
@@ -1513,7 +1519,7 @@ $("#scrim").onclick = () => {
 // ---------- keyboard shortcuts ----------
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
-    for (const m of ["#new-modal", "#picker", "#file-modal", "#snip-modal", "#copy-modal", "#settings-modal", "#palette", "#diff-modal", "#fx-modal"]) $(m).classList.add("hidden");
+    for (const m of ["#new-modal", "#picker", "#file-modal", "#snip-modal", "#copy-modal", "#settings-modal", "#palette", "#diff-modal", "#fx-modal"]) $(m)?.classList.add("hidden");
     $("#fx-ctx")?.classList.add("hidden");
     hideMenu(); hidePjPop();
     closeTermSearch();
@@ -1567,7 +1573,7 @@ function palItems() {
     { kind: "ACT", label: "Toggle sidebar", sub: "Ctrl+B", run: () => { sideVisible = !sideVisible; localStorage.setItem("rd.sidebar", sideVisible ? "1" : "0"); applyToggles(); } },
     { kind: "ACT", label: "Go home", sub: "all projects", run: () => goHome() },
     { kind: "ACT", label: "File transfer", sub: "full file explorer", run: () => openExplorer() },
-    { kind: "ACT", label: "Remote screen", sub: "view & control desktop", run: () => $("#screen-btn").click() },
+    { kind: "ACT", label: "Remote screen", sub: "view & control desktop", run: openScreen },
     { kind: "ACT", label: "Copy mode", sub: "copy terminal buffer", run: () => openCopy() },
     { kind: "ACT", label: "Search in terminal", sub: "Ctrl+F", run: () => setTimeout(openTermSearch, 0) },
     { kind: "ACT", label: "Split terminal", sub: "two sessions side by side", run: () => toggleSplit() },
@@ -2561,243 +2567,6 @@ $("#new-ok").onclick = () => {
     typerDelta = 0;
     fitVisible();
   }).observe(termsEl);
-  // ---------- remote screen ----------
-  const scrModal = $("#screen-modal"), scrImg = $("#scr-img"), scrStat = $("#scr-stat");
-  const scrStage = $("#scr-stage"), scrCanvas = $("#scr-canvas"), scrCtx = scrCanvas.getContext("2d");
-  let scrOpen = false, scrPoll = null, scrArmR = false, scrPt = null, scrT2 = null;
-  let scrPro = false;                 // pro mode: native dxgi push agent
-  const scrSend = (o, pro) => send({ type: "screen", pro: pro === undefined ? scrPro : pro, ...o });
-  const scrReqW = () => {
-    return Math.max(480, Math.min(1920, Math.round((scrStage ? scrStage.clientWidth : innerWidth) * devicePixelRatio)));
-  };
-  const scrView = () => (scrPro ? scrCanvas : scrImg);
-  const scrFrac = (cx, cy) => {
-    const r = scrView().getBoundingClientRect();
-    return { x: Math.min(1, Math.max(0, (cx - r.left) / r.width)), y: Math.min(1, Math.max(0, (cy - r.top) / r.height)) };
-  };
-  const scrAsk = (delay) => {
-    clearTimeout(scrPoll);
-    if (scrOpen && !scrPro) scrPoll = setTimeout(() => scrSend({ op: "shot", w: scrReqW(), q: 55 }), delay);
-  };
-  const scrSub = () => scrSend({ op: "sub", w: scrReqW(), fps: 15, q: 70 });
-  const scrShow = () => {
-    scrImg.classList.toggle("hidden", scrPro);
-    scrCanvas.classList.toggle("hidden", !scrPro);
-  };
-  let scrWatch = null, scrGot = false;
-  const scrWatchdog = () => {
-    clearInterval(scrWatch);
-    scrGot = false;
-    scrWatch = setInterval(() => {
-      if (!scrOpen || scrGot) { clearInterval(scrWatch); return; }
-      if (!wsAlive) {
-        scrStat.textContent = "socket down — reconnecting…";
-        clearTimeout(reconnectTimer);
-        try { connect(); } catch {}
-        return;
-      }
-      scrStat.textContent = "waiting for host… (old server? reload/upgrade)";
-      scrSub();
-    }, 4000);
-  };
-  screenResub = () => { if (scrOpen) scrSub(); };
-  onScreenMsg = (m) => {
-    if (m.pro) {
-      if (m.op === "clip") {                                       // host clipboard -> local
-        if (navigator.clipboard && m.text != null)
-          navigator.clipboard.writeText(m.text)
-            .then(() => { scrStat.textContent = "⧉ host clipboard synced"; })
-            .catch(() => {});
-        return;
-      }
-      if (m.op === "pro-needed") scrStat.textContent = "pro: extension not installed — tap PRO again to install";
-      else if (m.op === "err") scrStat.textContent = m.msg || "pro error";
-      else if (m.op === "info" && !scrGot) scrStat.textContent = `pro ${m.w}x${m.h} [${m.src || "?"}], waiting frames…`;
-      else if (!scrGot) scrStat.textContent = "pro: " + m.op;
-      return;
-    }
-    if (m.op === "frame") {
-      if (!scrGot) { scrGot = true; clearInterval(scrWatch); }
-      scrImg.src = "data:image/jpeg;base64," + m.b64; scrStat.textContent = m.w + "x" + m.h; scrAsk(120);
-    } else if (m.op === "err") { scrStat.textContent = m.msg || "error"; scrAsk(1000); }
-    else if (!scrGot) scrStat.textContent = (m.op === "info" ? `host ${m.w}x${m.h}, waiting frames…` : "host: " + m.op);
-  };
-  // binary pro tile frame: [u8 'F'][u16 w][u16 h][u16 tile][u16 count] then x,y,w,h,jlen,jpeg
-  onScreenBin = (ab) => {
-    if (!scrOpen || !scrPro) return;
-    const dv = new DataView(ab);
-    if (dv.getUint8(0) !== 0x46) return;              // 'F'
-    const w = dv.getUint16(1, true), h = dv.getUint16(3, true), n = dv.getUint16(7, true);
-    if (scrCanvas.width !== w || scrCanvas.height !== h) { scrCanvas.width = w; scrCanvas.height = h; }
-    let off = 9;
-    const jobs = [];
-    for (let i = 0; i < n; i++) {
-      const x = dv.getUint16(off, true), y = dv.getUint16(off + 2, true);
-      const tw = dv.getUint16(off + 4, true), th = dv.getUint16(off + 6, true);
-      const jl = dv.getUint32(off + 8, true); off += 12;
-      const jpg = new Blob([ab.slice(off, off + jl)], { type: "image/jpeg" }); off += jl;
-      jobs.push(createImageBitmap(jpg).then((b) => { scrCtx.drawImage(b, x, y, tw, th); b.close(); }));
-    }
-    Promise.all(jobs).then(() => {
-      if (!scrGot) { scrGot = true; clearInterval(scrWatch); }
-      scrStat.textContent = `${w}x${h} pro`;
-    }).catch(() => {});
-  };
-  const setPro = async (on) => {
-    const btn = $("#scr-pro");
-    if (on) {
-      scrStat.textContent = "checking pro extension…";
-      let st = await fetch("/api/screen-pro").then((r) => r.json()).catch(() => null);
-      if (!st) { scrStat.textContent = "host unreachable"; return; }
-      if (!st.installed) {
-        if (!confirm("Remote Pro needs a small native agent on the host (~20KB, compiled locally via .NET — no download). Install it now?")) {
-          scrStat.textContent = "";
-          return;
-        }
-        scrStat.textContent = "installing pro extension…";
-        st = await fetch("/api/screen-pro", { method: "POST" }).then((r) => r.json()).catch(() => null);
-        if (!st || !st.ok) { scrStat.textContent = "install failed: " + ((st && st.error) || "see host console"); return; }
-      }
-    }
-    scrSend({ op: "unsub" }, scrPro);                  // leave current mode
-    scrPro = on;
-    btn.classList.toggle("on", scrPro);
-    scrShow();
-    if (scrOpen) { scrGot = false; scrSub(); scrWatchdog(); }
-  };
-  $("#scr-pro").onclick = () => setPro(!scrPro);
-  $("#screen-btn").onclick = () => {
-    scrModal.classList.remove("hidden"); scrOpen = true;
-    scrImg.removeAttribute("src"); scrShow(); scrStat.textContent = "connecting…";
-    scrSub();
-    scrWatchdog();
-  };
-  $("#scr-close").onclick = () => {
-    scrOpen = false; clearTimeout(scrPoll); clearInterval(scrWatch);
-    scrModal.classList.add("hidden");
-    if (held.size) { releaseAll(); }                                // don't leave keys stuck on host
-    if ($("#scr-block").classList.contains("on")) { scrSend({ op: "block", on: false }, true); $("#scr-block").classList.remove("on"); }
-    scrSend({ op: "unsub" }, false); scrSend({ op: "unsub" }, true);
-    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
-  };
-  $("#scr-rmb").onclick = (e) => { scrArmR = !scrArmR; e.target.classList.toggle("on", scrArmR); };
-  $("#scr-kb").onclick = () => $("#scr-keys").classList.toggle("hidden");
-  $("#scr-send").onclick = () => {
-    const t = $("#scr-type").value;
-    if (t) scrSend({ op: "type", text: t });
-    scrSend({ op: "key", k: "{ENTER}" });
-    $("#scr-type").value = "";
-  };
-  $("#scr-type").addEventListener("keydown", (e) => { if (e.key === "Enter") $("#scr-send").click(); });
-  for (const b of document.querySelectorAll(".scr-k"))
-    b.onclick = () => scrSend({ op: "key", k: b.dataset.k });
-  // ---------- pro control: real keyboard + clipboard + shortcuts ----------
-  const VK = { Backspace: 8, Tab: 9, Enter: 13, ShiftLeft: 160, ShiftRight: 161, ControlLeft: 162, ControlRight: 163,
-    AltLeft: 164, AltRight: 165, Pause: 19, CapsLock: 20, Escape: 27, Space: 32, PageUp: 33, PageDown: 34, End: 35,
-    Home: 36, ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, PrintScreen: 44, Insert: 45, Delete: 46,
-    MetaLeft: 91, MetaRight: 92, ContextMenu: 93, NumLock: 144, ScrollLock: 145,
-    Semicolon: 186, Equal: 187, Comma: 188, Minus: 189, Period: 190, Slash: 191, Backquote: 192,
-    BracketLeft: 219, Backslash: 220, BracketRight: 221, Quote: 222,
-    NumpadMultiply: 106, NumpadAdd: 107, NumpadSubtract: 109, NumpadDecimal: 110, NumpadDivide: 111 };
-  for (let i = 0; i < 10; i++) { VK["Digit" + i] = 48 + i; VK["Numpad" + i] = 96 + i; }
-  for (let i = 0; i < 26; i++) VK["Key" + String.fromCharCode(65 + i)] = 65 + i;
-  for (let i = 1; i <= 12; i++) VK["F" + i] = 111 + i;
-  const held = new Set();
-  const releaseAll = () => { for (const vk of held) scrSend({ op: "ku", vk }); held.clear(); };
-  const COMBOS = { "alt-tab": [[164], 9], "alt-f4": [[164], 115], taskmgr: [[162, 160], 27], win: [[], 91],
-    "win-d": [[91], 68], "win-e": [[91], 69], "win-r": [[91], 82], prtsc: [[], 44] };
-  scrCanvas.tabIndex = 0;
-  scrCanvas.addEventListener("keydown", (e) => {
-    if (!scrPro) return;
-    e.preventDefault(); e.stopPropagation();
-    const vk = VK[e.code];
-    if (e.ctrlKey && e.code === "KeyV") {                          // ordered: clip first, then host paste
-      held.delete(86);
-      if (navigator.clipboard)
-        navigator.clipboard.readText()
-          .then((t) => { if (t) scrSend({ op: "clip", text: t }); setTimeout(() => scrSend({ op: "combo", mods: [162], vk: 86 }), 120); })
-          .catch(() => scrSend({ op: "combo", mods: [162], vk: 86 }));
-      else scrSend({ op: "combo", mods: [162], vk: 86 });
-      return;
-    }
-    if (!vk || held.has(vk)) return;
-    held.add(vk); scrSend({ op: "kd", vk });
-  });
-  scrCanvas.addEventListener("keyup", (e) => {
-    if (!scrPro) return;
-    e.preventDefault();
-    const vk = VK[e.code];
-    if (vk && held.delete(vk)) scrSend({ op: "ku", vk });
-  });
-  scrCanvas.addEventListener("blur", releaseAll);
-  scrCanvas.addEventListener("contextmenu", (e) => {
-    e.preventDefault();
-    if (scrOpen) scrSend({ op: "click", btn: "r", ...scrFrac(e.clientX, e.clientY) });
-  });
-  scrCanvas.addEventListener("auxclick", (e) => {
-    e.preventDefault();
-    if (!scrOpen) return;
-    const btn = e.button === 1 ? "m" : e.button === 3 ? "x1" : e.button === 4 ? "x2" : null;
-    if (btn) scrSend({ op: "click", btn, ...scrFrac(e.clientX, e.clientY) });
-  });
-  $("#scr-paste").onclick = () => {                                // mobile paste: clip -> ctrl+v
-    if (!navigator.clipboard) return;
-    navigator.clipboard.readText()
-      .then((t) => { if (t) { scrSend({ op: "clip", text: t }); setTimeout(() => scrSend({ op: "combo", mods: [162], vk: 86 }), 150); } })
-      .catch(() => { scrStat.textContent = "clipboard blocked — long-press and use browser paste"; });
-  };
-  for (const b of document.querySelectorAll(".scr-c"))
-    b.onclick = () => { const c = COMBOS[b.dataset.c]; if (c) scrSend({ op: "combo", mods: c[0], vk: c[1] }); };
-  $("#scr-fs").onclick = () => {
-    const card = document.querySelector(".screen-card");
-    if (document.fullscreenElement) document.exitFullscreen();
-    else if (card.requestFullscreen) card.requestFullscreen().catch(() => {});
-  };
-  $("#scr-block").onclick = (e) => {
-    const on = !e.target.classList.contains("on");
-    e.target.classList.toggle("on", on);
-    scrSend({ op: "block", on });
-    scrStat.textContent = on ? "host input BLOCKED" : "";
-  };
-  // pointer: tap = click, press-and-drag = drag, long-press or armed = right click
-  scrStage.addEventListener("pointerdown", (e) => {
-    e.preventDefault();
-    if (scrPro) scrCanvas.focus({ preventScroll: true });           // keyboard capture for pro
-    if (scrPt) { scrPt = null; return; }          // second finger cancels
-    scrStage.setPointerCapture(e.pointerId);
-    scrPt = { x: e.clientX, y: e.clientY, t: Date.now(), drag: false, pid: e.pointerId };
-  });
-  scrStage.addEventListener("pointermove", (e) => {
-    if (!scrPt || e.pointerId !== scrPt.pid) return;
-    if (!scrPt.drag && Math.hypot(e.clientX - scrPt.x, e.clientY - scrPt.y) > 8) {
-      scrPt.drag = true;
-      scrSend({ op: "down", btn: "l", ...scrFrac(scrPt.x, scrPt.y) });
-    }
-    if (scrPt.drag) scrSend({ op: "move", ...scrFrac(e.clientX, e.clientY) });
-  });
-  const scrUp = (e) => {
-    if (!scrPt || e.pointerId !== scrPt.pid) return;
-    if (scrPt.drag) scrSend({ op: "up", btn: "l", ...scrFrac(e.clientX, e.clientY) });
-    else {
-      const right = scrArmR || Date.now() - scrPt.t > 550;
-      scrSend({ op: "click", btn: right ? "r" : "l", ...scrFrac(e.clientX, e.clientY) });
-    }
-    scrArmR = false; $("#scr-rmb").classList.remove("on"); scrPt = null;
-  };
-  scrStage.addEventListener("pointerup", scrUp);
-  scrStage.addEventListener("pointercancel", () => { scrPt = null; });
-  scrStage.addEventListener("dblclick", (e) => scrSend({ op: "click", dbl: true, ...scrFrac(e.clientX, e.clientY) }));
-  scrStage.addEventListener("wheel", (e) => {
-    e.preventDefault();
-    scrSend({ op: "scroll", d: Math.sign(e.deltaY) * 360, ...scrFrac(e.clientX, e.clientY) });
-  }, { passive: false });
-  scrStage.addEventListener("touchmove", (e) => {           // two-finger scroll
-    if (e.touches.length !== 2) { scrT2 = null; return; }
-    const y = (e.touches[0].clientY + e.touches[1].clientY) / 2;
-    if (scrT2 != null && Math.abs(y - scrT2) > 6) { scrSend({ op: "scroll", x: 0.5, y: 0.5, d: (y - scrT2) * 2 }); scrT2 = y; }
-    else scrT2 = y;
-  }, { passive: true });
-
   // soft keyboard: slide the whole frame up instead of refitting terminals
   // (no repaint). Sources, whichever reports more: virtualKeyboard API
   // (Chromium 94+) and visualViewport (Safari/Firefox/older). In the APK the

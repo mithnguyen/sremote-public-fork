@@ -15,4 +15,6 @@ android/keystore/
 android/keystore.properties
 *.apk
 agent/screen-pro/ScreenPro.exe
+agent/screen-pro/ScreenPro.exe.new
+agent/screen-pro/ScreenPro.ver
 agent/tray/SremoteTray.exe

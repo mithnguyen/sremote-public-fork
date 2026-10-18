@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="theme-color" content="#000000">
+<title>Remote screen</title>
+<link rel="icon" href="/logo.svg">
+<link rel="stylesheet" href="/screen.css?v=1">
+</head>
+<body>
+<div id="stage">
+  <canvas id="cv" width="16" height="9"></canvas>
+  <img id="cur" class="hidden" alt="" draggable="false">
+</div>
+
+<div id="msg" class="msg"><div class="spin"></div><span id="msg-t">Connecting…</span><button id="msg-act" class="hidden"></button></div>
+
+<div id="bar" class="bar">
+  <button id="b-close" class="ib" title="Close (back to S-remote)"><svg viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg></button>
+  <div class="who"><b id="host">Remote screen</b><small id="stats">connecting…</small></div>
+  <span class="sep"></span>
+  <select id="s-mon" class="sel hidden" title="Monitor"></select>
+  <select id="s-q" class="sel" title="Quality">
+    <option value="auto">Auto</option>
+    <option value="high">High</option>
+    <option value="balanced">Balanced</option>
+    <option value="low">Low data</option>
+  </select>
+  <button id="b-mode" class="ib touch-only" title="Touch mode: trackpad / direct"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="12" rx="2"/><path d="M9 21h6"/></svg><span class="lbl" id="b-mode-l">Trackpad</span></button>
+  <button id="b-kbd" class="ib" title="Keyboard"><svg viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10"/></svg></button>
+  <button id="b-keys" class="ib" title="Special keys &amp; shortcuts"><svg viewBox="0 0 24 24"><path d="M5 7h4v4H5zM5 13h4v4H5zM11 7h8M11 11h5M11 15h8"/></svg></button>
+  <button id="b-clip" class="ib" title="Clipboard"><svg viewBox="0 0 24 24"><rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 4h6v3H9z"/></svg></button>
+  <button id="b-fit" class="ib hidden" title="Fit to window"><svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
+  <button id="b-more" class="ib" title="More"><svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/></svg></button>
+  <button id="b-fs" class="ib" title="Fullscreen (captures Win / Alt+Tab keys)"><svg viewBox="0 0 24 24"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg></button>
+</div>
+<button id="bar-tab" class="bar-tab" title="Show toolbar"></button>
+
+<div id="more" class="pop hidden">
+  <button data-act="block"><span>Block host input</span><small id="block-st">off</small></button>
+  <button data-act="refresh"><span>Refresh picture</span></button>
+  <button data-act="taskmgr"><span>Task Manager</span><small>Ctrl+Shift+Esc</small></button>
+  <button data-act="lock"><span>Lock host</span><small>Win+L</small></button>
+  <button data-act="home"><span>Back to S-remote</span></button>
+</div>
+
+<div id="keys" class="panel hidden">
+  <div class="krow">
+    <button class="k mod" data-mod="162">Ctrl</button>
+    <button class="k mod" data-mod="164">Alt</button>
+    <button class="k mod" data-mod="160">Shift</button>
+    <button class="k mod" data-mod="91">Win</button>
+    <span class="ksep"></span>
+    <button class="k" data-vk="27">Esc</button>
+    <button class="k" data-vk="9">Tab</button>
+    <button class="k" data-vk="13">Enter</button>
+    <button class="k" data-vk="8">⌫</button>
+    <button class="k" data-vk="46">Del</button>
+    <button class="k" data-vk="37">←</button>
+    <button class="k" data-vk="38">↑</button>
+    <button class="k" data-vk="40">↓</button>
+    <button class="k" data-vk="39">→</button>
+    <button class="k" data-vk="36">Home</button>
+    <button class="k" data-vk="35">End</button>
+    <button class="k" data-vk="33">PgUp</button>
+    <button class="k" data-vk="34">PgDn</button>
+  </div>
+  <div class="krow">
+    <button class="k sc" data-combo="164,9">Alt+Tab</button>
+    <button class="k sc" data-combo="164,115">Alt+F4</button>
+    <button class="k sc" data-combo="91,68">Win+D</button>
+    <button class="k sc" data-combo="91,69">Win+E</button>
+    <button class="k sc" data-combo="91,82">Win+R</button>
+    <button class="k sc" data-combo="162,67">Ctrl+C</button>
+    <button class="k sc" data-combo="162,86">Ctrl+V</button>
+    <button class="k sc" data-combo="162,88">Ctrl+X</button>
+    <button class="k sc" data-combo="162,90">Ctrl+Z</button>
+    <button class="k sc" data-combo="162,65">Ctrl+A</button>
+    <button class="k sc" data-combo="162,83">Ctrl+S</button>
+    <button class="k sc" data-combo="162,160,27">TaskMgr</button>
+    <button class="k sc" data-combo="44">PrtSc</button>
+    <span class="ksep"></span>
+    <button class="k" data-vk="112">F1</button><button class="k" data-vk="113">F2</button><button class="k" data-vk="114">F3</button>
+    <button class="k" data-vk="115">F4</button><button class="k" data-vk="116">F5</button><button class="k" data-vk="117">F6</button>
+    <button class="k" data-vk="118">F7</button><button class="k" data-vk="119">F8</button><button class="k" data-vk="120">F9</button>
+    <button class="k" data-vk="121">F10</button><button class="k" data-vk="122">F11</button><button class="k" data-vk="123">F12</button>
+  </div>
+</div>
+
+<div id="clip" class="panel clip hidden">
+  <div class="clip-col">
+    <label>Host clipboard</label>
+    <textarea id="clip-host" readonly placeholder="Copy something on the host — it shows up here"></textarea>
+    <div class="clip-btns"><button id="clip-copy" class="btn">Copy to this device</button></div>
+  </div>
+  <div class="clip-col">
+    <label>Send to host</label>
+    <textarea id="clip-local" placeholder="Paste or type here…"></textarea>
+    <div class="clip-btns">
+      <button id="clip-set" class="btn">Set host clipboard</button>
+      <button id="clip-type" class="btn ghost">Type it</button>
+    </div>
+  </div>
+</div>
+
+<textarea id="kbd" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" aria-hidden="true"></textarea>
+<div id="toast" class="toast hidden"></div>
+<div id="help" class="help hidden"></div>
+<script src="/screen.js?v=1"></script>
+</body>
+</html>
