@@ -23,9 +23,9 @@ const TERM_THEMES = {
 };
 let themeName = localStorage.getItem("rd.theme") === "light" ? "light" : "dark";
 
-const sessListEl = $("#sess-list"), tabsEl = $("#tabs"), termsEl = $("#terms");
+const navTreeEl = $("#nav-tree"), tabsEl = $("#tabs"), termsEl = $("#terms");
 const emptyEl = $("#empty"), sidebar = $("#sidebar"), filesPanel = $("#filespanel");
-const wsGridEl = $("#ws-grid"), homeSessEl = $("#home-sessions");
+const homeProjEl = $("#home-projects"), homeRecentEl = $("#home-recent");
 
 // ---------- toasts ----------
 function toast(msg, kind = "ok") {
@@ -94,7 +94,80 @@ function fmtSize(n) {
   return (n / 1073741824).toFixed(1) + " GB";
 }
 const wsById = (id) => workspaces.find((w) => w.id === id);
-const sessInView = () => sessions.filter((s) => (s.workspace || null) === (currentWs ?? null));
+const lsGet = (k, d) => { try { const v = JSON.parse(localStorage.getItem(k)); return v == null ? d : v; } catch { return d; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
+
+// ---------- recency + activity ----------
+// mru: session id -> last time YOU opened it; seen: id -> output ts already looked at.
+// Server pushes lastOut for every session, so "new output" works across all projects.
+const mru = lsGet("rd.mru", {}), seen = lsGet("rd.seen", {});
+let seenSaveT = null;
+const saveSeen = () => { clearTimeout(seenSaveT); seenSaveT = setTimeout(() => lsSet("rd.seen", seen), 1500); };
+function touchMru(id) {
+  mru[id] = Date.now();
+  const ids = Object.keys(mru);
+  if (ids.length > 80) for (const k of ids.sort((a, b) => mru[a] - mru[b]).slice(0, ids.length - 80)) delete mru[k];
+  lsSet("rd.mru", mru);
+}
+function markSeen(id) {
+  const s = sessions.find((x) => x.id === id);
+  seen[id] = Math.max(Date.now(), (s && s.lastOut) || 0);
+  saveSeen();
+}
+const BUSY_MS = 6000;
+function sessState(s) { // off | bell | busy | new | idle
+  if (s.exited) return "off";
+  if (notifiedSess.has(s.id)) return "bell";
+  if (s.lastOut && Date.now() - s.lastOut < BUSY_MS) return "busy";
+  if (s.lastOut && s.lastOut > (seen[s.id] || s.createdAt || 0) + 1500 && s.id !== activeId) return "new";
+  return "idle";
+}
+const ST_TIP = { off: "exited", bell: "needs attention", busy: "running — output just now", new: "new output since you looked", idle: "idle" };
+const sessUsed = (s) => Math.max(mru[s.id] || 0, s.createdAt || 0);
+const sessWs = (s) => (s.workspace && wsById(s.workspace) ? s.workspace : null); // removed project → standalone
+const wsSessions = (wsId) => sessions.filter((s) => sessWs(s) === wsId);
+const wsUsed = (w) => Math.max(w.lastUsed || 0, ...wsSessions(w.id).map((s) => mru[s.id] || 0));
+const sessTitle = (s) => { const p = panes.get(s.id); return (p && p.title) || ""; };
+const pinsLoad = () => new Set(lsGet("rd.pins", []));
+const pinsSave = (set) => lsSet("rd.pins", [...set]);
+
+// ---------- fuzzy match ----------
+// every query token must hit the haystack: substring (word-start bonus) or, weaker,
+// an in-order subsequence ("sremsrv" → "sremote-server"). Returns -1 or a score.
+function fzToken(t, h) {
+  const i = h.indexOf(t);
+  if (i >= 0) return 60 + (i === 0 ? 40 : /[\s\/_\-.:]/.test(h[i - 1]) ? 25 : 0) - Math.min(i, 30) / 3;
+  let j = 0, gaps = 0, last = -1;
+  for (let k = 0; k < h.length && j < t.length; k++) if (h[k] === t[j]) { if (last >= 0) gaps += k - last - 1; last = k; j++; }
+  return j === t.length && t.length > 1 ? Math.max(1, 30 - gaps) : -1;
+}
+function fz(q, ...fields) {
+  const toks = q.toLowerCase().split(/\s+/).filter(Boolean);
+  if (!toks.length) return 0;
+  const hs = fields.map((f) => String(f || "").toLowerCase());
+  let total = 0;
+  for (const t of toks) {
+    let best = -1;
+    hs.forEach((h, n) => { const sc = fzToken(t, h); if (sc >= 0) best = Math.max(best, sc - n * 8); }); // earlier field = stronger
+    if (best < 0) return -1;
+    total += best;
+  }
+  return total;
+}
+function hl(text, q) { // escape + <mark> substring hits of each token
+  const src = String(text || "");
+  const toks = q.toLowerCase().split(/\s+/).filter((t) => t.length > 0);
+  if (!toks.length) return esc(src);
+  const low = src.toLowerCase(), on = new Array(src.length).fill(false);
+  for (const t of toks) { const i = low.indexOf(t); if (i >= 0) for (let k = i; k < i + t.length; k++) on[k] = true; }
+  let out = "", open = false;
+  for (let k = 0; k < src.length; k++) {
+    if (on[k] !== open) { out += on[k] ? "<mark>" : "</mark>"; open = on[k]; }
+    out += esc(src[k]);
+  }
+  return out + (open ? "</mark>" : "");
+}
+const sessInView = () => sessions.filter((s) => sessWs(s) === (currentWs ?? null));
 
 // ---------- websocket ----------
 function connect() {
@@ -138,18 +211,20 @@ function connect() {
         if (p) {
           p.term.write(m.data);
           p.lastOutAt = Date.now(); p.idleNotified = false; // reset busy→quiet edge
+          if (m.id === activeId && document.visibilityState === "visible") { seen[m.id] = Date.now(); saveSeen(); }
           if (m.id !== activeId) {
             unreadSess.add(m.id);
             const t = tabsEl.querySelector(`[data-id="${m.id}"]`);
             if (t) t.classList.add("unread");
           }
-          if (hasAttentionSeq(m.data)) notifySession(m.id, "bell");
+          // scrollback replayed on attach is old news — its BELs don't count
+          if (hasAttentionSeq(m.data) && !(p.replayUntil > Date.now())) notifySession(m.id, "bell");
         }
         break;
       }
       case "attached": {
         const p = panes.get(m.id);
-        if (p) { p.attached = true; sendSize(m.id, p); }
+        if (p) { p.attached = true; p.replayUntil = Date.now() + 1500; sendSize(m.id, p); }
         break;
       }
       case "exit": {
@@ -162,6 +237,12 @@ function connect() {
         select(m.id);
         break;
       }
+      case "activity": { // {id: lastOut} for all sessions, coalesced server-side
+        for (const s of sessions) if (m.map[s.id]) s.lastOut = m.map[s.id];
+        if (activeId && m.map[activeId] && document.visibilityState === "visible") { seen[activeId] = m.map[activeId]; saveSeen(); }
+        refreshStates();
+        break;
+      }
       case "pong":
         for (const el of [$("#latency"), $("#latency2")]) if (el) el.textContent = `${Date.now() - m.t}ms`;
         break;
@@ -169,7 +250,7 @@ function connect() {
     }
   };
 }
-const inView = (id) => { const s = sessions.find((x) => x.id === id); return s && (s.workspace || null) === (currentWs ?? null); };
+const inView = (id) => { const s = sessions.find((x) => x.id === id); return s && sessWs(s) === (currentWs ?? null); };
 function send(o) { if (wsAlive) ws.send(JSON.stringify(o)); }
 function setConn(up) {
   document.body.classList.toggle("disconnected", !up);
@@ -191,29 +272,47 @@ function showView(v) {
   $("#view-home").classList.toggle("hidden", v !== "home");
   $("#view-work").classList.toggle("hidden", v !== "work");
   if (v === "work") renderAll();
-  else { renderMachines(); renderDevports(); } // refresh tailnet + dev-server cards on each home show
+  else { renderHome(); renderSessions(); renderMachines(); renderDevports(); } // refresh tailnet + dev-server cards on each home show
 }
-function enterWorkspace(wsId) {
+function enterWorkspace(wsId, pickId) {
+  hidePjPop();
   currentWs = wsId;            // id | null (standalone)
   splitId = null; splitFocus = "left";
   const w = wsId ? wsById(wsId) : null;
-  $("#ws-title").innerHTML = w
-    ? `<span class="wt-name">${folderSvg(16)} ${esc(w.name)}</span><span class="wt-path">${esc(w.path)}</span>`
-    : `<span class="wt-name">Standalone</span><span class="wt-path">no workspace</span>`;
+  if (w) w.lastUsed = Date.now();
+  $("#nav-q").value = ""; navQ = "";
+  homeQ.value = ""; // a search that got you here is done; home reopens unfiltered
+  if (view !== "work") { try { history.pushState({ sr: "work" }, ""); } catch {} } // Back / edge swipe → home
+  $("#new-btn-ws").textContent = w ? `in ${w.name}` : "";
   setTitle();
   showView("work");
   if (mqNarrow.matches) { sideVisible = false; fpVisible = false; applyToggles(); } // drawers start closed on narrow screens
   fpRoot = w ? `ws:${w.id}` : null;
   fpPath = "";
-  // pick a session in this workspace
-  const vis = sessInView().filter((s) => !s.exited);
-  const pick = vis[0] || sessInView()[0];
+  // pick a session in this workspace: requested one, else the one you used last
+  const inWs = sessInView();
+  const pick = inWs.find((s) => s.id === pickId)
+    || [...inWs].sort((a, b) => (a.exited - b.exited) || sessUsed(b) - sessUsed(a))[0];
   activeId = null;
   if (pick) select(pick.id); else updateEmpty();
   renderAll();
   if (fpVisible && fpRoot) fpNavigate("");
 }
+// open any session from anywhere (home, navigator, palette) — switches project if needed
+function openSession(id) {
+  const s = sessions.find((x) => x.id === id);
+  if (!s) return;
+  if (view === "work" && (currentWs ?? null) === sessWs(s)) select(id);
+  else enterWorkspace(sessWs(s), id);
+}
+// new terminal straight in a project, default shell, no dialog
+function quickNew(wsId) {
+  if (view !== "work" || (currentWs ?? null) !== wsId) enterWorkspace(wsId);
+  const shell = localStorage.getItem("rd.shell") || (hostInfo.shells || ["powershell"])[0];
+  send({ type: "create", shell, cols: 120, rows: 32, ...(wsId ? { workspace: wsId } : { cwd: hostInfo.home }) });
+}
 function goHome() {
+  if (history.state && history.state.sr === "work") { skipPop = true; history.back(); } // drop our entry
   view = "home";
   activeId = null;             // sessions keep running; panes stay attached
   splitId = null; splitFocus = "left";
@@ -221,8 +320,25 @@ function goHome() {
   for (const p of panes.values()) p.el.classList.add("hidden");
   setTitle();
   showView("home");
+  if (!isCoarse) setTimeout(() => homeQ.focus(), 0);
 }
 $("#home-btn").onclick = goHome;
+
+// Back button / edge swipe / Android back: close an overlay first, else work → home.
+// Never lets the browser leave the page from the work view.
+let skipPop = false;
+window.addEventListener("popstate", () => {
+  if (skipPop) { skipPop = false; return; }
+  const open = [...document.querySelectorAll(".modal:not(.hidden), #palette:not(.hidden)")];
+  if (open.length || !popMenu.classList.contains("hidden") || !pjPop.classList.contains("hidden")) {
+    if (!$("#screen-modal").classList.contains("hidden")) $("#scr-close").click();
+    for (const m of open) m.classList.add("hidden");
+    hideMenu(); hidePjPop();
+    if (view === "work") { try { history.pushState({ sr: "work" }, ""); } catch {} } // stay in the terminal
+    return;
+  }
+  if (view === "work") goHome();
+});
 
 // ---------- deep links (Android app): #s=<sid> | #ws=<id> | #screen ----------
 // applied once sessions/workspaces are known; the hash is cleared afterwards so
@@ -237,14 +353,13 @@ function applyRoute() {
   if (sid) {
     const s = sessions.find((x) => x.id === sid);
     if (s) {
-      if (view !== "work" || (currentWs ?? null) !== (s.workspace || null)) enterWorkspace(s.workspace || null);
-      select(sid);
+      openSession(sid);
     }
   } else if (wsId && wsById(wsId)) {
     enterWorkspace(wsId);
   }
   if (q.has("screen")) $("#screen-btn").click();
-  history.replaceState(null, "", location.pathname + location.search);
+  history.replaceState(history.state, "", location.pathname + location.search);
 }
 window.addEventListener("hashchange", applyRoute);
 
@@ -417,7 +532,7 @@ function select(id) {
   if (splitId && id === splitId) { // picked the session already on the other side → just move focus
     splitFocus = splitFocus === "left" ? "right" : "left";
     const t = activeId; activeId = splitId; splitId = t;
-    clearNotify(id); unreadSess.delete(id);
+    clearNotify(id); unreadSess.delete(id); touchMru(id); markSeen(id);
     renderTabs(); renderSessions(); layoutPanes();
     const fp = panes.get(id); if (fp) fp.term.focus();
     return;
@@ -425,6 +540,7 @@ function select(id) {
   activeId = id;
   clearNotify(id);
   unreadSess.delete(id);
+  touchMru(id); markSeen(id);
   if (mqNarrow.matches && sideVisible) { sideVisible = false; applyToggles(); } // auto-close drawer on narrow screens
   const p = ensurePane(id);
   layoutPanes();
@@ -474,22 +590,120 @@ function gitInfo(base) {
     .then((r) => r.json()).then((v) => { gitCache.set(base, { t: Date.now(), v }); return v; })
     .catch(() => null);
 }
-const pinsLoad = () => { try { return new Set(JSON.parse(localStorage.getItem("rd.pins") || "[]")); } catch { return new Set(); } };
-const pinsSave = (s) => { try { localStorage.setItem("rd.pins", JSON.stringify([...s])); } catch {} };
 function renderAll() {
   renderSessions(); renderTabs(); renderHome(); updateEmpty(); layoutPanes();
 }
-function renderSessions() {
-  sessListEl.innerHTML = "";
-  for (const s of sessInView()) {
-    const p = panes.get(s.id);
-    const d = document.createElement("div");
-    d.className = "sess-item" + (s.id === activeId ? " active" : "") + (s.exited ? " exited" : "") + (unreadSess.has(s.id) ? " unread" : "");
-    d.innerHTML = `<span class="sess-dot"></span><span class="sess-txt"><span class="sess-name">${esc(s.name)}</span><span class="sess-cwd">${esc(shortPath(s.cwd))}</span></span><span class="sess-time">${relTime(p && p.lastOutAt)}</span>`;
-    d.onclick = () => select(s.id);
-    sessListEl.appendChild(d);
+const dotHtml = (s) => { const st = sessState(s); return `<i class="st st-${st}" data-st="${s.id}" title="${ST_TIP[st]}"></i>`; };
+const timeHtml = (s) => `<span class="tm" data-tm="${s.id}">${s.lastOut ? relTime(s.lastOut) : ""}</span>`;
+// cheap in-place refresh of every status dot / "3m" label (activity ticks, timers)
+function refreshStates() {
+  for (const el of document.querySelectorAll("[data-st]")) {
+    const s = sessions.find((x) => x.id === el.dataset.st);
+    if (!s) continue;
+    const st = sessState(s), c = "st st-" + st;
+    if (el.className !== c) { el.className = c; el.title = ST_TIP[st]; }
+  }
+  for (const el of document.querySelectorAll("[data-tm]")) {
+    const s = sessions.find((x) => x.id === el.dataset.tm);
+    if (s) el.textContent = s.lastOut ? relTime(s.lastOut) : "";
+  }
+  for (const el of document.querySelectorAll("[data-wsdot]")) { // project-level "something new inside"
+    const id = el.dataset.wsdot === "@solo" ? null : el.dataset.wsdot;
+    const st = wsSessions(id).map(sessState);
+    el.className = "wsdot" + (st.includes("bell") ? " bell" : st.includes("new") ? " new" : st.includes("busy") ? " busy" : "");
   }
 }
+
+// ---------- navigator (sidebar tree: every project, its sessions) ----------
+const navOpen = new Set(lsGet("rd.navopen", []));
+let navQ = "";
+function navToggle(key) {
+  if (navOpen.has(key)) navOpen.delete(key); else navOpen.add(key);
+  lsSet("rd.navopen", [...navOpen]);
+  renderSessions();
+}
+function projectList() { // [{key, w|null, name, path, list}] incl. a pseudo "Standalone" bucket
+  const out = workspaces.map((w) => ({ key: w.id, w, name: w.name, path: w.path, list: wsSessions(w.id) }));
+  const solo = wsSessions(null);
+  if (solo.length) out.push({ key: "@solo", w: null, name: "Standalone", path: "terminals outside any project", list: solo });
+  return out;
+}
+const projUsed = (p) => p.w ? wsUsed(p.w) : Math.max(0, ...p.list.map(sessUsed));
+function renderSessions() { // name kept: called all over — renders the navigator tree
+  if (!navTreeEl) return;
+  navTreeEl.innerHTML = "";
+  const q = navQ, pins = pinsLoad(), cur = currentWs ?? null;
+  let projs = projectList().map((p) => {
+    const ps = q ? fz(q, p.name, p.path) : 0;
+    const hits = q ? p.list.map((s) => ({ s, sc: fz(q, s.name, sessTitle(s), s.cwd) })).filter((x) => x.sc >= 0) : [];
+    return { ...p, ps, hits, score: Math.max(ps, ...hits.map((x) => x.sc + 5)) };
+  });
+  if (q) projs = projs.filter((p) => p.score >= 0).sort((a, b) => b.score - a.score);
+  else projs.sort((a, b) =>
+    ((b.key === (cur || "@solo")) - (a.key === (cur || "@solo")))
+    || (pins.has(b.key) - pins.has(a.key))
+    || ((b.list.length > 0) - (a.list.length > 0))
+    || projUsed(b) - projUsed(a));
+  let restLabel = false;
+  for (const p of projs) {
+    const isCur = p.key === (cur || "@solo") && view === "work";
+    if (!q && !restLabel && !p.list.length && !pins.has(p.key) && !isCur) { // quiet projects at the bottom
+      restLabel = true;
+      const l = document.createElement("div");
+      l.className = "nav-label"; l.textContent = "NO SESSIONS";
+      navTreeEl.appendChild(l);
+    }
+    const open = q ? true : isCur || navOpen.has(p.key);
+    const g = document.createElement("div");
+    g.className = "nav-grp" + (isCur ? " cur" : "") + (open ? " open" : "");
+    const live = p.list.filter((s) => !s.exited).length;
+    const h = document.createElement("div");
+    h.className = "nav-proj";
+    h.title = p.path;
+    h.innerHTML = `<span class="nav-caret">›</span>${folderSvg(15)}
+      <span class="nav-pname">${hl(p.name, q)}</span>
+      <i class="wsdot" data-wsdot="${p.key}"></i>
+      ${pins.has(p.key) ? `<span class="nav-pin" title="Pinned">★</span>` : ""}
+      <span class="nav-n">${live || ""}</span>
+      <button class="nav-add" title="New terminal in ${esc(p.name)}">+</button>`;
+    h.onclick = (e) => {
+      if (e.target.closest(".nav-add")) { quickNew(p.w ? p.w.id : null); return; }
+      if (q) { if (p.list[0]) openSession((p.hits[0] || { s: p.list[0] }).s.id); else if (p.w) enterWorkspace(p.w.id); return; }
+      if (!p.list.length) { if (p.w) enterWorkspace(p.w.id); return; }
+      navToggle(p.key);
+    };
+    h.oncontextmenu = (e) => { e.preventDefault(); projMenu(e, p); };
+    g.appendChild(h);
+    if (open) {
+      const kids = document.createElement("div");
+      kids.className = "nav-kids";
+      const list = q && p.ps < 0 ? p.hits.map((x) => x.s) : [...p.list].sort((a, b) => (a.exited - b.exited) || sessUsed(b) - sessUsed(a));
+      for (const s of list) {
+        const d = document.createElement("div");
+        d.className = "nav-sess" + (s.id === activeId && view === "work" ? " active" : "") + (s.exited ? " exited" : "");
+        d.dataset.sid = s.id;
+        const ttl = sessTitle(s);
+        d.innerHTML = `${dotHtml(s)}<span class="nav-stxt"><span class="nav-sname">${hl(s.name, q)}</span>${ttl ? `<span class="nav-ssub">${hl(ttl.slice(0, 60), q)}</span>` : ""}</span>${timeHtml(s)}`;
+        d.onclick = () => openSession(s.id);
+        d.oncontextmenu = (e) => { e.preventDefault(); sessMenu(e, s); };
+        kids.appendChild(d);
+      }
+      if (!list.length) kids.innerHTML = `<div class="nav-empty">No terminals yet</div>`;
+      g.appendChild(kids);
+    }
+    navTreeEl.appendChild(g);
+  }
+  if (!projs.length) navTreeEl.innerHTML = `<div class="nav-empty pad">No match for “${esc(q)}”</div>`;
+  refreshStates();
+}
+const navQIn = $("#nav-q");
+navQIn.addEventListener("input", () => { navQ = navQIn.value.trim(); renderSessions(); });
+navQIn.addEventListener("keydown", (e) => {
+  e.stopPropagation();
+  if (e.key === "Escape") { navQIn.value = ""; navQ = ""; renderSessions(); const p = panes.get(activeId); if (p) p.term.focus(); }
+  else if (e.key === "Enter") { const first = navTreeEl.querySelector(".nav-sess"); if (first) first.click(); }
+});
+
 function renderTabs() {
   tabsEl.innerHTML = "";
   for (const s of sessInView()) {
@@ -506,100 +720,300 @@ function renderTabs() {
     tabsEl.appendChild(t);
   }
 }
+
+// ---------- home: search + continue + compact project list ----------
+const homeQ = $("#home-q");
+let homeFilter = localStorage.getItem("rd.hfilter") || "all";
+let homeSort = localStorage.getItem("rd.hsort") || "recent";
+let homeTargets = [], homeSel = -1; // keyboard-navigable rows/chips, in visual order
+function syncSegs() {
+  for (const b of document.querySelectorAll("#home-filter button")) b.classList.toggle("on", b.dataset.f === homeFilter);
+  for (const b of document.querySelectorAll("#home-sort button")) b.classList.toggle("on", b.dataset.s === homeSort);
+}
+for (const b of document.querySelectorAll("#home-filter button"))
+  b.onclick = () => { homeFilter = b.dataset.f; localStorage.setItem("rd.hfilter", homeFilter); renderHome(); };
+for (const b of document.querySelectorAll("#home-sort button"))
+  b.onclick = () => { homeSort = b.dataset.s; localStorage.setItem("rd.hsort", homeSort); renderHome(); };
+function chipHtml(s, q) {
+  const ttl = sessTitle(s);
+  return `<button class="sc${s.exited ? " exited" : ""}" data-sid="${s.id}" title="${esc(ttl || s.cwd || s.name)}">${dotHtml(s)}<span class="sc-n">${hl(s.name, q)}</span>${timeHtml(s)}</button>`;
+}
 function renderHome() {
-  // workspace cards
-  wsGridEl.innerHTML = "";
-  const pinSet = pinsLoad();
-  const sorted = [...workspaces].sort((a, b) =>
-    (pinSet.has(b.id) - pinSet.has(a.id)) || (b.lastUsed || 0) - (a.lastUsed || 0));
-  for (const w of sorted) {
-    const n = sessions.filter((s) => s.workspace === w.id && !s.exited).length;
-    const pinned = pinSet.has(w.id);
+  syncSegs();
+  const q = homeQ.value.trim(), pins = pinsLoad();
+  // CONTINUE: the sessions you opened most recently (hidden while searching)
+  const recent = sessions.filter((s) => mru[s.id] && !s.exited).sort((a, b) => mru[b.id] - mru[a.id]).slice(0, 6);
+  $("#home-recent-sec").classList.toggle("hidden", !!q || !recent.length || homeFilter === "pinned");
+  homeRecentEl.innerHTML = recent.map((s) => {
+    const w = s.workspace ? wsById(s.workspace) : null;
+    const ttl = sessTitle(s);
+    return `<button class="rc" data-sid="${s.id}">${dotHtml(s)}<span class="rc-txt"><b>${esc(s.name)}</b><small>${esc(w ? w.name : "Standalone")}${ttl ? " · " + esc(ttl.slice(0, 40)) : ""}</small></span><span class="rc-t">${relTime(mru[s.id])}</span></button>`;
+  }).join("");
+  // PROJECTS
+  let projs = projectList().map((p) => {
+    const ps = q ? fz(q, p.name, p.path) : 0;
+    const hits = q ? p.list.filter((s) => fz(q, s.name, sessTitle(s), s.cwd) >= 0) : p.list;
+    const score = q ? Math.max(ps, ...p.list.map((s) => { const sc = fz(q, s.name, sessTitle(s), s.cwd); return sc < 0 ? -1 : sc + 5; })) : 0;
+    return { ...p, ps, hits, score, live: p.list.filter((s) => !s.exited).length, pinned: pins.has(p.key) };
+  });
+  if (homeFilter === "active") projs = projs.filter((p) => p.live);
+  if (homeFilter === "pinned") projs = projs.filter((p) => p.pinned);
+  if (q) projs = projs.filter((p) => p.score >= 0);
+  const byName = (a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+  projs.sort(q ? (a, b) => b.score - a.score
+    : homeSort === "name" ? (a, b) => (b.pinned - a.pinned) || byName(a, b)
+    : (a, b) => (b.pinned - a.pinned) || projUsed(b) - projUsed(a));
+  $("#home-count").textContent = q ? `${projs.length} match${projs.length === 1 ? "" : "es"}`
+    : `${workspaces.length} projects · ${sessions.filter((s) => !s.exited).length} live`;
+  homeProjEl.innerHTML = "";
+  let lastGroup = null;
+  for (const p of projs) {
+    const group = q ? "RESULTS" : p.pinned ? "PINNED" : "PROJECTS";
+    if (group !== lastGroup) {
+      lastGroup = group;
+      const l = document.createElement("div");
+      l.className = "home-label"; l.textContent = group;
+      homeProjEl.appendChild(l);
+      homeProjEl.appendChild(Object.assign(document.createElement("div"), { className: "pj-grid" }));
+    }
+    const grid = homeProjEl.lastElementChild;
     const d = document.createElement("div");
-    d.className = "ws-card";
-    d.innerHTML = `<div class="ws-acts${pinned ? " pinon" : ""}">
-        <span class="ws-act ws-pin${pinned ? " on" : ""}" title="${pinned ? "Unpin" : "Pin"}">📌</span>
-        <span class="ws-act ws-ren" title="Rename">✎</span>
-        <span class="ws-x" title="Remove">×</span>
+    d.className = "pj" + (p.live ? "" : " quiet");
+    const list = q && p.ps < 0 ? p.hits : [...p.list].sort((a, b) => (a.exited - b.exited) || sessUsed(b) - sessUsed(a));
+    d.innerHTML = `<div class="pj-head">
+        <span class="pj-ico">${folderSvg(22)}</span>
+        <span class="pj-txt"><span class="pj-name">${hl(p.name, q)}<i class="wsdot" data-wsdot="${p.key}"></i></span>${q && p.ps >= 0 && fz(q, p.name) < 0 ? `<span class="pj-path">${hl(p.path, q)}</span>` : ""}</span>
+        <span class="pj-git"></span>
+        ${p.w ? `<button class="pj-act pj-pin${p.pinned ? " on" : ""}" title="${p.pinned ? "Unpin" : "Pin to top"}">★</button>
+        <button class="pj-act pj-more" title="More">⋯</button>` : ""}
+        <button class="pj-info" title="Details" aria-label="Project details">i</button>
       </div>
-      <div class="ws-card-ico">${folderSvg(34)}</div>
-      <div class="ws-card-name">${esc(w.name)}</div>
-      <div class="ws-card-path">${esc(w.path)}</div>
-      <div class="ws-card-meta">${n ? `${n} live session${n > 1 ? "s" : ""}` : "idle"}</div>`;
+      <div class="pj-sess">${list.map((s) => chipHtml(s, q)).join("")}<button class="sc sc-new" title="New terminal here">+<span class="lbl"> New</span></button></div>`;
     d.onclick = (e) => {
-      if (e.target.closest(".ws-acts")) {
-        if (e.target.classList.contains("ws-pin")) {
-          const s = pinsLoad();
-          if (s.has(w.id)) s.delete(w.id); else s.add(w.id);
-          pinsSave(s); renderHome();
-        } else if (e.target.classList.contains("ws-ren")) renameWs(w, d);
-        else if (e.target.classList.contains("ws-x")) {
-          fetch(`/api/workspaces/${w.id}`, { method: "DELETE" })
-            .then((r) => { if (r.ok) { toast(`Removed workspace “${w.name}”`); loadWorkspaces(); } });
-        }
-        return; // actions never enter the workspace
+      const chip = e.target.closest("[data-sid]");
+      if (chip) return openSession(chip.dataset.sid);
+      if (e.target.closest(".sc-new")) return quickNew(p.w ? p.w.id : null);
+      if (e.target.closest(".pj-pin")) {
+        const s = pinsLoad(); if (s.has(p.key)) s.delete(p.key); else s.add(p.key);
+        pinsSave(s); renderHome(); return;
       }
-      enterWorkspace(w.id);
+      if (e.target.closest(".pj-more")) return projMenu(e, p);
+      if (e.target.closest(".pj-info")) return togglePjPop(e.target.closest(".pj-info"), p, true);
+      if (e.target.closest(".pj-head")) { if (p.w) enterWorkspace(p.w.id); else if (p.list[0]) openSession(p.list[0].id); }
     };
-    wsGridEl.appendChild(d);
-    gitInfo(`ws:${w.id}`).then((g) => { // lazily patch repo status into the card
-      if (!g || !g.isRepo || !d.isConnected) return;
-      const gl = document.createElement("div");
-      gl.className = "ws-git";
-      gl.textContent = `⎇ ${g.branch || "detached"} · ${g.changed ? `${g.changed} changed` : "clean"}`;
-      const meta = d.querySelector(".ws-card-meta");
-      if (meta) meta.after(gl);
+    d.oncontextmenu = (e) => {
+      const chip = e.target.closest("[data-sid]");
+      e.preventDefault();
+      if (chip) { const s = sessions.find((x) => x.id === chip.dataset.sid); if (s) sessMenu(e, s); }
+      else projMenu(e, p);
+    };
+    const info = d.querySelector(".pj-info");
+    info.onmouseenter = () => { if (!isCoarse) showPjPop(info, p, false); };
+    info.onmouseleave = () => schedHidePjPop();
+    grid.appendChild(d);
+    if (p.w) gitInfo(`ws:${p.w.id}`).then((g) => { // lazily patch repo status
+      const el = d.querySelector(".pj-git");
+      if (!g || !g.isRepo || !el) return;
+      el.textContent = `⎇ ${g.branch || "detached"}${g.changed ? ` · ${g.changed}±` : ""}`;
+      el.title = g.changed ? `${g.changed} changed file(s)` : "clean";
+      el.classList.toggle("dirty", !!g.changed);
     });
   }
-  const add = document.createElement("div");
-  add.className = "ws-card ws-add";
-  add.innerHTML = `<div class="ws-add-plus">+</div><div class="ws-card-name">Add workspace</div>`;
-  add.onclick = () => openPicker((p) => {
-    fetch("/api/workspaces", { method: "POST", body: JSON.stringify({ path: p }) })
-      .then((r) => r.json()).then((w) => { toast(`Workspace “${w.name}” added`); loadWorkspaces(); });
-  });
-  wsGridEl.appendChild(add);
-  // all sessions
-  homeSessEl.innerHTML = "";
-  if (!sessions.length) homeSessEl.innerHTML = `<div class="home-none">No sessions yet — open a workspace to start one.</div>`;
-  for (const s of sessions) {
-    const w = s.workspace ? wsById(s.workspace) : null;
-    const d = document.createElement("div");
-    d.className = "home-sess" + (s.exited ? " exited" : "");
-    d.innerHTML = `<span class="hs-state ${s.exited ? "off" : "on"}"></span>
-      <span class="hs-name">${esc(s.name)}</span>
-      <span class="hs-ws">${w ? esc(w.name) : "standalone"}</span>
-      <span class="hs-cwd">${esc(shortPath(s.cwd))}</span>
-      <span class="ws-x" title="Kill">×</span>`;
-    d.onclick = (e) => {
-      if (e.target.classList.contains("ws-x")) { send({ type: "kill", id: s.id }); toast(`Killed “${s.name}”`); return; }
-      enterWorkspace(s.workspace || null);
-      setTimeout(() => select(s.id), 0);
-    };
-    homeSessEl.appendChild(d);
+  if (!projs.length) {
+    homeProjEl.innerHTML = q
+      ? `<div class="home-none">Nothing matches “${esc(q)}”. <button class="linkish" id="home-clear">Clear search</button></div>`
+      : homeFilter !== "all"
+        ? `<div class="home-none">No ${homeFilter} projects. <button class="linkish" id="home-clear">Show all</button></div>`
+        : `<div class="home-none">No projects yet — add a folder to get started.</div>`;
+    const c = $("#home-clear");
+    if (c) c.onclick = () => { homeQ.value = ""; homeFilter = "all"; localStorage.setItem("rd.hfilter", "all"); renderHome(); };
   }
+  for (const b of homeRecentEl.querySelectorAll("[data-sid]")) {
+    b.onclick = () => openSession(b.dataset.sid);
+    b.oncontextmenu = (e) => { e.preventDefault(); const s = sessions.find((x) => x.id === b.dataset.sid); if (s) sessMenu(e, s); };
+  }
+  // document order = visual order; selector-list querySelectorAll already returns it
+  homeTargets = [...document.querySelectorAll("#home-recent [data-sid], #home-projects .pj-head, #home-projects [data-sid], #home-projects .sc-new")];
+  homeSel = -1;
+  if (q) { // preselect the best hit: its first matching chip if the project itself didn't match
+    const first = projs[0];
+    const chip = first && first.ps < 0 && homeProjEl.querySelector("[data-sid]");
+    homeSel = chip ? homeTargets.indexOf(chip) : 0;
+  }
+  homeSync();
+  refreshStates();
 }
-function renameWs(w, card) { // inline rename, same pattern as renameSession
-  const nameEl = card.querySelector(".ws-card-name");
-  if (!nameEl) return;
-  const inp = document.createElement("input");
-  inp.className = "ws-rename"; inp.value = w.name;
-  nameEl.replaceWith(inp);
-  inp.focus(); inp.select();
-  inp.onclick = (e) => e.stopPropagation();
-  const done = (commit) => {
-    const v = inp.value.trim();
-    if (commit && v && v !== w.name)
-      return fetch(`/api/workspaces/${w.id}`, { method: "PATCH", body: JSON.stringify({ name: v }) })
-        .then(async (r) => {
-          if (r.ok) { toast(`Renamed to “${v}”`); loadWorkspaces(); }
-          else { toast("Rename failed", "err"); renderHome(); }
-        })
-        .catch(() => { toast("Rename failed", "err"); renderHome(); });
-    renderHome();
+function homeSync() {
+  homeTargets.forEach((el, i) => el.classList.toggle("kb-sel", i === homeSel));
+  const el = homeTargets[homeSel];
+  if (el && el.scrollIntoView && homeQ.value) el.scrollIntoView({ block: "nearest" });
+}
+homeQ.addEventListener("input", renderHome);
+homeQ.addEventListener("keydown", (e) => {
+  e.stopPropagation();
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault();
+    if (!homeTargets.length) return;
+    homeSel = e.key === "ArrowDown" ? Math.min(homeSel + 1, homeTargets.length - 1) : Math.max(homeSel - 1, 0);
+    homeSync();
+  } else if (e.key === "Enter") {
+    e.preventDefault();
+    const el = homeTargets[Math.max(0, homeSel)];
+    if (el) el.click();
+  } else if (e.key === "Escape") { homeQ.value = ""; renderHome(); homeQ.blur(); }
+  else if ((e.ctrlKey || e.metaKey) && (e.key === "k" || e.key === "K")) { e.preventDefault(); openPalette(); }
+});
+// typing anywhere on home goes to the search box; "/" focuses it
+document.addEventListener("keydown", (e) => {
+  if (view !== "home" || e.ctrlKey || e.metaKey || e.altKey) return;
+  const t = e.target;
+  if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable)) return;
+  if (document.querySelector(".modal:not(.hidden)") || !$("#palette").classList.contains("hidden")) return;
+  if (e.key === "/") { e.preventDefault(); homeQ.focus(); homeQ.select(); }
+  else if (e.key.length === 1 && /\S/.test(e.key)) homeQ.focus(); // the char then lands in the input
+});
+$("#home-add").onclick = addProject;
+$("#tool-screen").onclick = () => $("#screen-btn").click();
+function addProject() {
+  openPicker((p) => {
+    fetch("/api/workspaces", { method: "POST", body: JSON.stringify({ path: p }) })
+      .then((r) => r.json()).then((w) => {
+        if (w.error) return toast(w.error, "err");
+        toast(`Project “${w.name}” added`); loadWorkspaces();
+      });
+  });
+}
+
+// ---------- project details popover ("i" in the card corner): hover or tap ----------
+const pjPop = $("#pj-pop");
+let pjPopFor = null, pjPopSticky = false, pjPopT = null;
+function showPjPop(anchor, p, sticky) {
+  clearTimeout(pjPopT);
+  pjPopFor = anchor; pjPopSticky = sticky;
+  const live = p.list.filter((s) => !s.exited).length, ex = p.list.length - live;
+  const pins = pinsLoad(), used = p.w ? wsUsed(p.w) : 0;
+  pjPop.innerHTML = `<div class="pp-name">${esc(p.name)}</div>
+    <div class="pp-k">Path</div><div class="pp-path">${esc(p.path)}</div>
+    <div class="pp-row"><span class="pp-k">Sessions</span><span>${live} live${ex ? ` · ${ex} exited` : ""}</span></div>
+    ${p.w ? `<div class="pp-row"><span class="pp-k">Last used</span><span>${!used ? "—" : relTime(used) === "just now" ? "just now" : relTime(used) + " ago"}</span></div>
+    <div class="pp-row pp-git"><span class="pp-k">Git</span><span>…</span></div>
+    <div class="pp-btns">
+      <button class="mini-btn" data-a="copy">Copy path</button>
+      <button class="mini-btn" data-a="files">Browse</button>
+      <button class="mini-btn" data-a="pin">${pins.has(p.key) ? "Unpin" : "Pin"}</button>
+      <button class="mini-btn" data-a="more">More…</button>
+    </div>` : ""}`;
+  pjPop.classList.remove("hidden");
+  const r = anchor.getBoundingClientRect(), w = pjPop.offsetWidth, h = pjPop.offsetHeight;
+  const x = Math.min(r.right - w, innerWidth - w - 8);
+  let y = r.bottom + 6;
+  if (y + h > innerHeight - 8) y = Math.max(8, r.top - h - 6);
+  pjPop.style.left = Math.max(8, x) + "px"; pjPop.style.top = y + "px";
+  if (p.w) gitInfo(`ws:${p.w.id}`).then((g) => {
+    const el = pjPop.querySelector(".pp-git span:last-child");
+    if (!el || pjPopFor !== anchor) return;
+    el.textContent = !g || !g.isRepo ? "not a repo" : `${g.branch || "detached"} · ${g.changed ? g.changed + " changed" : "clean"}`;
+  });
+  for (const b of pjPop.querySelectorAll("[data-a]")) b.onclick = () => {
+    const a = b.dataset.a;
+    hidePjPop();
+    if (a === "copy") { copyToClipboard(p.path); toast("Path copied"); }
+    else if (a === "files") openExplorer(p.path);
+    else if (a === "pin") togglePin(p.key);
+    else if (a === "more") projMenu({ target: anchor, clientX: 0, clientY: 0 }, p);
   };
-  inp.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") done(true); if (e.key === "Escape") done(false); };
-  inp.onblur = () => done(true);
+}
+function togglePjPop(anchor, p, sticky) {
+  if (pjPopFor === anchor && !pjPop.classList.contains("hidden") && pjPopSticky) return hidePjPop();
+  showPjPop(anchor, p, sticky);
+}
+function hidePjPop() { clearTimeout(pjPopT); pjPop.classList.add("hidden"); pjPopFor = null; pjPopSticky = false; }
+function schedHidePjPop() { if (!pjPopSticky) { clearTimeout(pjPopT); pjPopT = setTimeout(hidePjPop, 220); } }
+pjPop.onmouseenter = () => clearTimeout(pjPopT);
+pjPop.onmouseleave = () => schedHidePjPop();
+const outsidePop = (e) => { if (!pjPop.contains(e.target) && !(e.target.closest && e.target.closest(".pj-info"))) hidePjPop(); };
+document.addEventListener("mousedown", outsidePop);
+document.addEventListener("touchstart", outsidePop, { passive: true });
+$("#view-home").addEventListener("scroll", () => { if (!pjPopSticky) hidePjPop(); }, { passive: true });
+
+// ---------- small popup menu + text prompt (no window.prompt: Android WebView drops it) ----------
+const popMenu = $("#pop-menu");
+function showMenu(e, items) {
+  popMenu.innerHTML = "";
+  for (const it of items) {
+    if (it === "-") { popMenu.appendChild(Object.assign(document.createElement("div"), { className: "ctx-sep" })); continue; }
+    const b = document.createElement("button");
+    b.className = "ctx-item" + (it.danger ? " danger" : "");
+    b.textContent = it.label;
+    b.onclick = (ev) => { ev.stopPropagation(); hideMenu(); it.run(); };
+    popMenu.appendChild(b);
+  }
+  popMenu.classList.remove("hidden");
+  const r = e.target.closest && e.target.closest("button,.pj-head,.nav-proj,.nav-sess");
+  const rb = r ? r.getBoundingClientRect() : null;
+  let x = e.clientX || (rb ? rb.right - 8 : 20), y = e.clientY || (rb ? rb.bottom : 20);
+  const mw = popMenu.offsetWidth, mh = popMenu.offsetHeight;
+  x = Math.max(8, Math.min(x, innerWidth - mw - 8)); y = Math.max(8, Math.min(y, innerHeight - mh - 8));
+  popMenu.style.left = x + "px"; popMenu.style.top = y + "px";
+}
+function hideMenu() { popMenu.classList.add("hidden"); }
+document.addEventListener("mousedown", (e) => { if (!popMenu.contains(e.target)) hideMenu(); });
+document.addEventListener("touchstart", (e) => { if (!popMenu.contains(e.target)) hideMenu(); }, { passive: true });
+function askText(title, value, okLabel = "Save") {
+  return new Promise((res) => {
+    const m = $("#ask-modal"), inp = $("#ask-in");
+    $("#ask-title").textContent = title; $("#ask-ok").textContent = okLabel;
+    inp.value = value || "";
+    m.classList.remove("hidden");
+    setTimeout(() => { inp.focus(); inp.select(); }, 0);
+    const done = (v) => { m.classList.add("hidden"); inp.onkeydown = null; res(v); };
+    $("#ask-ok").onclick = () => done(inp.value.trim() || null);
+    $("#ask-cancel").onclick = () => done(null);
+    m.onclick = (e) => e.target === m && done(null);
+    inp.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") done(inp.value.trim() || null); if (e.key === "Escape") done(null); };
+  });
+}
+function togglePin(key) {
+  const s = pinsLoad(); if (s.has(key)) s.delete(key); else s.add(key);
+  pinsSave(s); renderAll();
+}
+function projMenu(e, p) {
+  const pins = pinsLoad();
+  const items = [{ label: "New terminal here", run: () => quickNew(p.w ? p.w.id : null) }];
+  if (p.w) items.push(
+    { label: "Open project", run: () => enterWorkspace(p.w.id) },
+    { label: "Browse files", run: () => openExplorer(p.w.path) },
+    { label: pins.has(p.key) ? "Unpin" : "Pin to top", run: () => togglePin(p.key) },
+    { label: "Rename…", run: async () => {
+      const v = await askText("Rename project", p.w.name);
+      if (!v || v === p.w.name) return;
+      const r = await fetch(`/api/workspaces/${p.w.id}`, { method: "PATCH", body: JSON.stringify({ name: v }) }).catch(() => null);
+      if (r && r.ok) { toast(`Renamed to “${v}”`); loadWorkspaces(); } else toast("Rename failed", "err");
+    } },
+    { label: "Copy path", run: () => { copyToClipboard(p.w.path); toast("Path copied"); } });
+  const exited = p.list.filter((s) => s.exited);
+  if (exited.length) items.push("-", { label: `Close ${exited.length} exited session(s)`, run: () => exited.forEach((s) => send({ type: "kill", id: s.id })) });
+  if (p.w) items.push("-", { label: "Remove from list", danger: true, run: () => {
+    if (p.list.length && !confirm(`Remove “${p.w.name}”? Its ${p.list.length} session(s) keep running as standalone.`)) return;
+    fetch(`/api/workspaces/${p.w.id}`, { method: "DELETE" })
+      .then((r) => { if (r.ok) { toast(`Removed “${p.w.name}”`); loadWorkspaces(); } });
+  } });
+  showMenu(e, items);
+}
+function sessMenu(e, s) {
+  showMenu(e, [
+    { label: "Open", run: () => openSession(s.id) },
+    { label: "Rename…", run: async () => {
+      const v = await askText("Rename session", s.name);
+      if (v && v !== s.name) send({ type: "rename", id: s.id, name: v });
+    } },
+    { label: "Copy working dir", run: () => { copyToClipboard(s.cwd || ""); toast("Path copied"); } },
+    "-",
+    { label: "Kill session", danger: true, run: () => {
+      if (view === "work" && inView(s.id)) closeSession(s.id); else send({ type: "kill", id: s.id });
+      toast(`Killed “${s.name}”`);
+    } },
+  ]);
 }
 
 // ---------- home: machines (tailnet peers) ----------
@@ -609,6 +1023,7 @@ async function renderMachines() {
   const peers = (j && j.peers) || [];
   if (!peers.length) { sec.classList.add("hidden"); return; }
   sec.classList.remove("hidden");
+  $("#peers-n").textContent = `${peers.filter((p) => p.online).length}/${peers.length} online`;
   box.innerHTML = "";
   for (const p of peers) {
     const d = document.createElement("div");
@@ -638,6 +1053,7 @@ async function renderDevports() {
     !DEV_SKIP_PORT.has(p.port) && !(p.proc && DEV_SKIP_PROC.has(p.proc)));
   if (!ports.length) { sec.classList.add("hidden"); return; }
   sec.classList.remove("hidden");
+  $("#dev-n").textContent = ports.length;
   box.innerHTML = "";
   const tip = hostInfo.tailscaleIp || location.hostname;
   for (const p of ports) {
@@ -973,10 +1389,11 @@ function hasAttentionSeq(d) {
 }
 const notifyAt = new Map(); // "id:reason" -> last toast/Notification ts
 function notifySession(id, reason) {
+  if (id === activeId && view === "work" && document.visibilityState === "visible") return; // you're looking at it
   notifiedSess.add(id);
   const t = tabsEl.querySelector(`[data-id="${id}"]`);
   if (t) t.classList.add("bell");
-  setTitle();
+  setTitle(); refreshStates();
   const sess = sessions.find((s) => s.id === id);
   const body = reason === "bell" ? "Process signaled attention" : "Session idle after output";
   const visible = document.visibilityState === "visible";
@@ -994,9 +1411,13 @@ function clearNotify(id) {
   notifiedSess.delete(id);
   const t = tabsEl.querySelector(`[data-id="${id}"]`);
   if (t) t.classList.remove("bell");
-  setTitle();
+  setTitle(); refreshStates();
 }
-document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") document.title = titleFor(); });
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "visible") return;
+  document.title = titleFor();
+  if (view === "work" && activeId) { markSeen(activeId); refreshStates(); }
+});
 window.addEventListener("focus", () => { document.title = titleFor(); });
 setInterval(() => { // idle detect: produced output then quiet ≥15s → notify once per busy→quiet edge
   const now = Date.now();
@@ -1094,6 +1515,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
     for (const m of ["#new-modal", "#picker", "#file-modal", "#snip-modal", "#copy-modal", "#settings-modal", "#palette", "#diff-modal", "#fx-modal"]) $(m).classList.add("hidden");
     $("#fx-ctx")?.classList.add("hidden");
+    hideMenu(); hidePjPop();
     closeTermSearch();
     return;
   }
@@ -1125,45 +1547,47 @@ const palette = $("#palette"), palIn = $("#pal-in"), palList = $("#pal-list");
 let palAll = [], palIdx = 0, palShown = [];
 function palItems() {
   const items = [];
-  for (const s of sessions) {
-    const w = s.workspace ? wsById(s.workspace) : null;
-    items.push({ kind: "TERM", label: s.name + (s.exited ? " (exited)" : ""), sub: `${w ? w.name : "standalone"} · ${shortPath(s.cwd)}`,
-      run: () => { enterWorkspace(s.workspace || null); setTimeout(() => select(s.id), 0); } });
+  // sessions in MRU order — the one you were on before sits first, so Ctrl+K, Enter flips back
+  const ss = [...sessions].sort((a, b) => (a.id === activeId) - (b.id === activeId) || (a.exited - b.exited) || sessUsed(b) - sessUsed(a));
+  for (const s of ss) {
+    const w = sessWs(s) ? wsById(sessWs(s)) : null, ttl = sessTitle(s);
+    items.push({ kind: "TERM", s, label: s.name + (s.exited ? " (exited)" : "") + (s.id === activeId ? " (current)" : ""),
+      sub: `${w ? w.name : "Standalone"} · ${ttl || shortPath(s.cwd)}`, hay: [s.name, w ? w.name : "", ttl, s.cwd],
+      run: () => openSession(s.id) });
   }
-  for (const w of workspaces)
-    items.push({ kind: "WS", label: w.name, sub: w.path, run: () => enterWorkspace(w.id) });
+  for (const w of [...workspaces].sort((a, b) => wsUsed(b) - wsUsed(a))) {
+    const n = wsSessions(w.id).filter((s) => !s.exited).length;
+    items.push({ kind: "PROJ", label: w.name, sub: `${n ? n + " live · " : ""}${w.path}`, hay: [w.name, w.path],
+      run: () => enterWorkspace(w.id) });
+  }
   items.push(
     { kind: "ACT", label: "New terminal", sub: "open the create dialog", run: () => openModal() },
+    { kind: "ACT", label: "Add project", sub: "pick a folder", run: () => addProject() },
     { kind: "ACT", label: "Toggle files panel", sub: "Ctrl+J", run: () => $("#files-toggle").click() },
     { kind: "ACT", label: "Toggle sidebar", sub: "Ctrl+B", run: () => { sideVisible = !sideVisible; localStorage.setItem("rd.sidebar", sideVisible ? "1" : "0"); applyToggles(); } },
-    { kind: "ACT", label: "Go home", sub: "workspace picker", run: () => goHome() },
+    { kind: "ACT", label: "Go home", sub: "all projects", run: () => goHome() },
+    { kind: "ACT", label: "File transfer", sub: "full file explorer", run: () => openExplorer() },
+    { kind: "ACT", label: "Remote screen", sub: "view & control desktop", run: () => $("#screen-btn").click() },
     { kind: "ACT", label: "Copy mode", sub: "copy terminal buffer", run: () => openCopy() },
     { kind: "ACT", label: "Search in terminal", sub: "Ctrl+F", run: () => setTimeout(openTermSearch, 0) },
     { kind: "ACT", label: "Split terminal", sub: "two sessions side by side", run: () => toggleSplit() },
     { kind: "ACT", label: "Settings", sub: "font, theme, shell, keybar", run: () => openSettings() },
   );
+  for (const it of items) if (!it.hay) it.hay = [it.label, it.sub];
   return items;
 }
-function palScore(it, q) { // startsWith > word-start > contains
-  const L = it.label.toLowerCase(), S = it.sub.toLowerCase();
-  if (L.startsWith(q)) return 3;
-  if (L.includes(" " + q) || L.includes("-" + q) || L.includes("_" + q)) return 2;
-  if (L.includes(q)) return 1;
-  if (S.includes(q)) return 0.5;
-  return -1;
-}
 function palRender() {
-  const q = palIn.value.trim().toLowerCase();
-  palShown = palAll.map((it) => ({ it, s: q ? palScore(it, q) : 0 }))
-    .filter((x) => x.s >= 0)
+  const q = palIn.value.trim();
+  palShown = palAll.map((it, i) => ({ it, s: q ? fz(q, ...it.hay) + (it.kind === "ACT" ? -10 : 0) : -i }))
+    .filter((x) => !q || x.s >= 0)
     .sort((a, b) => b.s - a.s)
-    .map((x) => x.it);
+    .map((x) => x.it).slice(0, 80);
   palIdx = Math.min(palIdx, Math.max(0, palShown.length - 1));
   palList.innerHTML = "";
   palShown.forEach((it, i) => {
     const d = document.createElement("div");
     d.className = "pal-item" + (i === palIdx ? " sel" : "");
-    d.innerHTML = `<span class="pal-kind">${it.kind}</span><span class="pal-txt"><span class="pal-name">${esc(it.label)}</span><span class="pal-sub">${esc(it.sub)}</span></span>`;
+    d.innerHTML = `<span class="pal-kind k-${it.kind.toLowerCase()}">${it.kind}</span>${it.s ? dotHtml(it.s) : ""}<span class="pal-txt"><span class="pal-name">${hl(it.label, q)}</span><span class="pal-sub">${hl(it.sub, q)}</span></span>`;
     d.onclick = () => { closePalette(); it.run(); };
     d.onmousemove = () => { if (palIdx !== i) { palIdx = i; palSync(); } };
     palList.appendChild(d);
@@ -1946,7 +2370,7 @@ fxMain.oncontextmenu = (e) => {
   fxShowCtx(e, null, null);
 };
 // ---- toolbar / footer wiring ----
-$("#fx-open").onclick = openExplorer;
+$("#fx-open").onclick = () => openExplorer();
 $("#fx-open").onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openExplorer(); } };
 $("#fx-close").onclick = closeExplorer;
 fxModal.onclick = (e) => { if (e.target === fxModal) closeExplorer(); };
@@ -2074,7 +2498,7 @@ $("#new-ok").onclick = () => {
   renderMachines(); renderDevports(); // initial home view — showView() isn't called at boot
   applyToggles();
   connect();
-  setInterval(() => { if (view === "work") renderSessions(); }, 30000); // keep sess-time fresh
+  setInterval(refreshStates, 3000); // busy → idle edges + "3m" labels (no server tick when output stops)
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
   let lastTermsH = termsEl.clientHeight;
   new ResizeObserver(() => {

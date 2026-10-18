@@ -149,6 +149,7 @@ function onHostMsg(m) {
       break;
     case "out": {
       const s = sessions.get(m.id); if (!s) break;
+      s.lastOut = Date.now(); activityDirty = true;
       const out = JSON.stringify({ type: "out", id: m.id, data: m.data });
       for (const ws of s.clients) if (ws.readyState === 1) ws.send(out);
       break;
@@ -247,12 +248,32 @@ function killSession(id) {
 function sessionList() {
   return [...sessions.values()].map((s) => ({
     id: s.id, name: s.name, shell: s.shell, cwd: s.cwd, workspace: s.workspace,
-    createdAt: s.createdAt, exited: s.exited, clients: s.clients.size,
+    createdAt: s.createdAt, exited: s.exited, clients: s.clients.size, lastOut: s.lastOut || 0,
   }));
 }
 function broadcastSessions() {
   const msg = JSON.stringify({ type: "sessions", list: sessionList() });
   for (const ws of wss ? wss.clients : []) if (ws.readyState === 1) ws.send(msg);
+}
+// output timestamps for every session (attached or not) → clients show busy/new-output dots;
+// coalesced so chatty sessions cost one small frame per tick
+let activityDirty = false;
+setInterval(() => {
+  if (!activityDirty || !wss) return;
+  activityDirty = false;
+  const map = {};
+  for (const s of sessions.values()) if (s.lastOut) map[s.id] = s.lastOut;
+  const msg = JSON.stringify({ type: "activity", map });
+  for (const ws of wss.clients) if (ws.readyState === 1) ws.send(msg);
+}, 2500);
+// opening a session counts as using its workspace (drives "recent" ordering)
+let usedSaveT = null;
+function touchWorkspace(id) {
+  const w = id && workspaceById(id);
+  if (!w) return;
+  w.lastUsed = Date.now();
+  clearTimeout(usedSaveT);
+  usedSaveT = setTimeout(saveState, 2000);
 }
 
 // ---------- external integrations (tailscale / netstat / git) ----------
@@ -884,6 +905,7 @@ wss.on("connection", (ws, req) => {
         if (!s) return;
         s.clients.add(ws);
         ws._attached = msg.id;
+        touchWorkspace(s.workspace);
         const tok = ++attachTok;
         pendingAttach.set(tok, ws);
         // broker revives exited sessions and replies with scrollback
