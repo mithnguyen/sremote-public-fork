@@ -154,6 +154,7 @@ class Dxgi : IDisposable {
 class ScreenPro {
   [DllImport("user32.dll")] static extern bool GetCursorInfo(ref CURSORINFO pci);
   [DllImport("user32.dll")] static extern bool GetCursorPos(out POINT2 p);
+  [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
   [DllImport("user32.dll")] static extern bool DrawIconEx(IntPtr hdc, int x, int y, IntPtr hcur, int w, int h, int step, IntPtr brush, uint flags);
   [DllImport("user32.dll")] static extern bool GetIconInfo(IntPtr hIcon, ref ICONINFO ii);
   [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr h);
@@ -201,9 +202,24 @@ class ScreenPro {
     i.u.mi.dx = dx; i.u.mi.dy = dy; i.u.mi.data = data; i.u.mi.dwFlags = flags;
     SendInput(1, new[] { i }, Marshal.SizeOf(typeof(INPUT)));
   }
+  // keep the pointer on the monitor being viewed — on a multi-monitor host a
+  // trackpad drag must not wander onto a screen the viewer can't see
+  static void ClampToCapture(ref int sx, ref int sy) {
+    sx = Math.Max(capX, Math.Min(capX + capW - 1, sx)); sy = Math.Max(capY, Math.Min(capY + capH - 1, sy));
+  }
   static void MoveTo(int sx, int sy) {
+    ClampToCapture(ref sx, ref sy);
+    // SetCursorPos takes exact physical pixels (process is per-monitor DPI aware);
+    // SendInput's normalized VIRTUALDESK coords land off-target on mixed-DPI /
+    // mixed-resolution monitor setups. SendInput only as a fallback.
+    if (SetCursorPos(sx, sy)) {
+      POINT2 p;
+      if (GetCursorPos(out p) && Math.Abs(p.x - sx) <= 1 && Math.Abs(p.y - sy) <= 1) {
+        SendMouse(0x0001, 0, 0, 0);                 // zero relative move: apps see a real mouse-move event
+        return;
+      }
+    }
     var v = SystemInformation.VirtualScreen;
-    sx = Math.Max(v.Left, Math.Min(v.Right - 1, sx)); sy = Math.Max(v.Top, Math.Min(v.Bottom - 1, sy));
     int nx = (int)Math.Round((sx - v.Left) * 65535.0 / Math.Max(1, v.Width - 1));
     int ny = (int)Math.Round((sy - v.Top) * 65535.0 / Math.Max(1, v.Height - 1));
     SendMouse(0x0001 | 0x8000 | 0x4000, nx, ny, 0);   // MOVE | ABSOLUTE | VIRTUALDESK

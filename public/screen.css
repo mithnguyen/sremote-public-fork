@@ -36,10 +36,13 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
   padding: 4px; border-radius: 14px; background: var(--glass); border: 1px solid var(--brd); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
   box-shadow: 0 10px 30px rgba(0,0,0,.45); transition: transform .2s ease, opacity .2s ease; max-width: calc(100vw - 16px); }
 .bar.off { transform: translate(-50%, calc(-100% - 14px - var(--safe-t))); opacity: 0; pointer-events: none; }
-.bar-tab { position: fixed; top: var(--kbtop); left: 50%; transform: translateX(-50%); z-index: 9; width: 64px; height: 14px; border: 0; padding: 0;
-  border-radius: 0 0 10px 10px; background: rgba(28,34,48,.75); border: 1px solid var(--brd); border-top: 0; cursor: pointer; opacity: 0; transition: opacity .2s; }
-.bar-tab::after { content: ""; position: absolute; left: 22px; right: 22px; top: 5px; height: 3px; border-radius: 2px; background: rgba(255,255,255,.45); }
-.bar.off + .bar-tab { opacity: 1; }
+/* the toolbar only opens from this tab (never on its own) */
+.bar-tab { position: fixed; top: var(--kbtop); left: 50%; transform: translateX(-50%); z-index: 9; width: 56px; height: 22px; padding: 0;
+  display: flex; align-items: center; justify-content: center; color: #cfd6e4; border-radius: 0 0 12px 12px;
+  background: rgba(28,34,48,.8); border: 1px solid var(--brd); border-top: 0; cursor: pointer; opacity: 0; pointer-events: none; transition: opacity .2s; }
+.bar-tab svg { width: 16px; height: 16px; }
+.bar-tab:hover { background: rgba(40,48,66,.92); }
+.bar.off + .bar-tab { opacity: .85; pointer-events: auto; }
 .ib { display: inline-flex; align-items: center; gap: 6px; height: 34px; min-width: 34px; padding: 0 8px; justify-content: center; border: 0; border-radius: 10px;
   background: transparent; color: var(--fg); cursor: pointer; white-space: nowrap; }
 .ib:hover { background: rgba(255,255,255,.08); }

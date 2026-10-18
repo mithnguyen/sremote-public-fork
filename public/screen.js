@@ -178,7 +178,7 @@ async function drawFrame(ab) {
     scr({ op: "ack" });                            // grants the agent its next frame
   }
   nFrames++;
-  if (!gotFrame) { gotFrame = true; status(null); showBarBriefly(); maybeHelp(); }
+  if (!gotFrame) { gotFrame = true; status(null); maybeHelp(); }
 }
 
 // ---------- basic (PowerShell) fallback ----------
@@ -190,7 +190,7 @@ function onBasic(m) {
     basicImg.onload = () => {
       if (cv.width !== m.w || cv.height !== m.h) { cv.width = m.w; cv.height = m.h; layout(); }
       ctx.drawImage(basicImg, 0, 0); nFrames++;
-      if (!gotFrame) { gotFrame = true; status(null); showBarBriefly(); }
+      if (!gotFrame) { gotFrame = true; status(null); }
       setTimeout(() => subbed && scr({ op: "shot", w: qParams().w, q: 55 }), 60);
     };
     basicImg.src = "data:image/jpeg;base64," + m.b64;
@@ -708,20 +708,12 @@ $("#clip-set").onclick = () => { if (clipLocal.value) { scr({ op: "clip", text: 
 $("#clip-type").onclick = () => { if (clipLocal.value) { scr({ op: "type", text: clipLocal.value }); toast("Typed on host"); } };
 
 // ---------- toolbar ----------
-let barT = null, barPinned = false;
-function showBar() { bar.classList.remove("off"); clearTimeout(barT); }
-function hideBarSoon(ms = 2500) {
-  clearTimeout(barT);
-  barT = setTimeout(() => {
-    if (barPinned || bar.matches(":hover") || !$("#more").classList.contains("hidden") || document.activeElement?.closest?.(".bar")) return hideBarSoon(1500);
-    bar.classList.add("off");
-  }, ms);
-}
-function showBarBriefly() { showBar(); hideBarSoon(TOUCH ? 4000 : 2500); }
-$("#bar-tab").onclick = showBarBriefly;
-addEventListener("mousemove", (e) => { if (e.clientY < 46) showBarBriefly(); });
-bar.addEventListener("pointerenter", showBar);
-bar.addEventListener("pointerleave", () => hideBarSoon());
+// opens/closes only on demand (tab / hide button) — it never pops up by itself,
+// so it can't cover the host's own top edge (tabs, title bars) while you work
+function showBar() { bar.classList.remove("off"); }
+function hideBar() { bar.classList.add("off"); hidePops(); stage.focus({ preventScroll: true }); }
+$("#bar-tab").onclick = showBar;
+$("#b-hide").onclick = hideBar;
 
 const selQ = $("#s-q");
 selQ.value = quality;
@@ -822,13 +814,14 @@ function maybeHelp() {
         <li>Double-tap and hold (or hold) then drag to drag/select</li>
         <li>Two-finger tap = right click · two-finger drag = scroll</li>
         <li>Pinch to zoom · three-finger tap = keyboard</li>
-        <li>Switch to <b>Touch</b> mode in the toolbar to tap exactly where you point</li></ul>
+        <li>Switch to <b>Touch</b> mode in the toolbar to tap exactly where you point</li>
+        <li>The ⌄ tab at the top opens the toolbar</li></ul>
         <button class="btn">Got it</button>`
     : `<h3>Remote control</h3><ul>
         <li>Your mouse and keyboard go straight to the host</li>
         <li><b>Fullscreen</b> also captures Win, Alt+Tab and Esc (hold Esc to leave)</li>
         <li>Ctrl+V pastes this computer's clipboard on the host; host copies show up as a prompt</li>
-        <li>Move the mouse to the top edge to bring back the toolbar</li></ul>
+        <li>The ⌄ tab at the top opens the toolbar, ⌃ hides it again</li></ul>
         <button class="btn">Got it</button>`;
   h.classList.remove("hidden");
   h.querySelector("button").onclick = () => { h.classList.add("hidden"); LS.set("help", 2); stage.focus(); };

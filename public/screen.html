@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#000000">
 <title>Remote screen</title>
 <link rel="icon" href="/logo.svg">
-<link rel="stylesheet" href="/screen.css?v=2">
+<link rel="stylesheet" href="/screen.css?v=3">
 </head>
 <body>
 <div id="stage">
@@ -16,7 +16,7 @@
 
 <div id="msg" class="msg"><div class="spin"></div><span id="msg-t">Connecting…</span><button id="msg-act" class="hidden"></button></div>
 
-<div id="bar" class="bar">
+<div id="bar" class="bar off">
   <button id="b-close" class="ib" title="Close (back to S-remote)"><svg viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg></button>
   <div class="who"><b id="host">Remote screen</b><small id="stats">connecting…</small></div>
   <span class="sep"></span>
@@ -35,6 +35,7 @@
   <button id="b-fit" class="ib hidden" title="Fit to window"><svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
   <button id="b-more" class="ib" title="More"><svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/></svg></button>
   <button id="b-fs" class="ib" title="Fullscreen (captures Win / Alt+Tab keys)"><svg viewBox="0 0 24 24"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg></button>
+  <button id="b-hide" class="ib" title="Hide toolbar"><svg viewBox="0 0 24 24"><path d="M6 15l6-6 6 6"/></svg></button>
   <div id="more" class="pop hidden">
     <button data-act="block"><span>Block host input</span><small id="block-st">off</small></button>
     <button data-act="refresh"><span>Refresh picture</span></button>
@@ -43,7 +44,7 @@
     <button data-act="home"><span>Back to S-remote</span></button>
   </div>
 </div>
-<button id="bar-tab" class="bar-tab" title="Show toolbar"></button>
+<button id="bar-tab" class="bar-tab" title="Show toolbar"><svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></button>
 
 
 <div id="keys" class="panel hidden">
@@ -108,6 +109,6 @@
 <textarea id="kbd" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" aria-hidden="true"></textarea>
 <div id="toast" class="toast hidden"></div>
 <div id="help" class="help hidden"></div>
-<script src="/screen.js?v=2"></script>
+<script src="/screen.js?v=3"></script>
 </body>
 </html>
