@@ -468,6 +468,36 @@ function zipInto(paths, destZip, baseDir) {
 
 // ---------- HTTP ----------
 const MIME = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".json": "application/json", ".png": "image/png", ".svg": "image/svg+xml", ".woff2": "font/woff2" };
+// user files (/api/file, /raw/) — broader map so html/media/pdf render inline
+const FILE_MIME = {
+  ...MIME, ".htm": "text/html", ".mjs": "text/javascript", ".map": "application/json", ".xml": "application/xml",
+  ".txt": "text/plain; charset=utf-8", ".md": "text/plain; charset=utf-8", ".csv": "text/plain; charset=utf-8",
+  ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".avif": "image/avif",
+  ".ico": "image/x-icon", ".bmp": "image/bmp", ".woff": "font/woff", ".ttf": "font/ttf", ".otf": "font/otf",
+  ".wasm": "application/wasm", ".pdf": "application/pdf",
+  ".mp4": "video/mp4", ".m4v": "video/mp4", ".mov": "video/mp4", ".webm": "video/webm", ".mkv": "video/webm",
+  ".ogv": "video/ogg", ".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".aac": "audio/aac", ".wav": "audio/wav",
+  ".ogg": "audio/ogg", ".oga": "audio/ogg", ".opus": "audio/ogg", ".flac": "audio/flac",
+};
+const fileMime = (p) => FILE_MIME[path.extname(p).toLowerCase()] || "application/octet-stream";
+// stream a file with HTTP Range support — video seeking needs 206 (iOS refuses to play without it)
+function sendFile(req, res, target, st, extra = {}) {
+  const hdrs = { "Content-Type": fileMime(target), "Accept-Ranges": "bytes", "X-File-Size": st.size, ...extra };
+  const m = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || "");
+  if (m && (m[1] || m[2])) {
+    let start = m[1] ? +m[1] : Math.max(0, st.size - +m[2]);
+    let end = m[1] && m[2] ? Math.min(+m[2], st.size - 1) : st.size - 1;
+    if (start >= st.size || start > end) {
+      res.writeHead(416, { "Content-Range": `bytes */${st.size}` }); return res.end();
+    }
+    res.writeHead(206, { ...hdrs, "Content-Range": `bytes ${start}-${end}/${st.size}`, "Content-Length": end - start + 1 });
+    if (req.method === "HEAD") return res.end();
+    return fs.createReadStream(target, { start, end }).pipe(res);
+  }
+  res.writeHead(200, { ...hdrs, "Content-Length": st.size });
+  if (req.method === "HEAD") return res.end();
+  fs.createReadStream(target).pipe(res);
+}
 
 function readBody(req, res, cb) {
   let body = "";
@@ -596,23 +626,35 @@ const server = http.createServer((req, res) => {
     try {
       const st = fs.statSync(target);
       if (!st.isFile()) return jsonErr(res, 400, "not a file");
-      const headOnly = url.searchParams.get("head") === "1";
-      const hdrs = {
-        "Content-Type": url.searchParams.get("dl") === "1"
-          ? "application/octet-stream"
-          : MIME[path.extname(target).toLowerCase()] || "application/octet-stream",
-        "Content-Length": headOnly ? Math.min(st.size, 512 * 1024) : st.size,
-        "X-File-Size": st.size,
-      };
+      if (url.searchParams.get("head") === "1") { // first 512 KB for text previews
+        res.writeHead(200, { "Content-Type": fileMime(target), "Content-Length": Math.min(st.size, 512 * 1024), "X-File-Size": st.size });
+        return fs.createReadStream(target, { end: 512 * 1024 - 1 }).pipe(res);
+      }
       if (url.searchParams.get("dl") === "1") {
         const fn = path.basename(target).replace(/"/g, "'");
-        hdrs["Content-Disposition"] =
-          `attachment; filename="${fn}"; filename*=UTF-8''${encodeURIComponent(fn)}`;
+        return sendFile(req, res, target, st, {
+          "Content-Type": "application/octet-stream",
+          "Content-Disposition": `attachment; filename="${fn}"; filename*=UTF-8''${encodeURIComponent(fn)}`,
+        });
       }
-      res.writeHead(200, hdrs);
-      const stream = fs.createReadStream(target, headOnly ? { end: 512 * 1024 - 1 } : {});
-      return stream.pipe(res);
+      return sendFile(req, res, target, st);
     } catch (e) { return jsonErr(res, 403, e.code || "unreadable"); }
+  }
+  // path-style file access so an html preview resolves its relative css/js/img:
+  //   /raw/<base>/<path>  e.g. /raw/@abs/C:/site/index.html, /raw/ws:<id>/docs/a.html
+  if (url.pathname.startsWith("/raw/") && (req.method === "GET" || req.method === "HEAD")) {
+    let parts;
+    try { parts = url.pathname.slice(5).split("/").map(decodeURIComponent); } catch { return jsonErr(res, 400, "bad path"); }
+    const root = resolveBase(parts.shift());
+    if (!root) return jsonErr(res, 400, "bad base");
+    let target = jail(root, root === ABS ? parts.join("/") || "." : parts.join("/"));
+    if (!target) return jsonErr(res, 403, "outside jail");
+    try {
+      let st = fs.statSync(target);
+      if (st.isDirectory()) { target = path.join(target, "index.html"); st = fs.statSync(target); }
+      if (!st.isFile()) return jsonErr(res, 400, "not a file");
+      return sendFile(req, res, target, st, { "Cache-Control": "no-cache" });
+    } catch (e) { return jsonErr(res, 404, e.code || "not found"); }
   }
   if (url.pathname === "/api/dbg" && req.method === "GET") {
     res.writeHead(200, { "Content-Type": "application/json" });

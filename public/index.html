@@ -12,7 +12,7 @@
 <meta name="theme-color" content="#070a10">
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="stylesheet" href="/vendor/xterm.css">
-<link rel="stylesheet" href="/style.css?v=24">
+<link rel="stylesheet" href="/style.css?v=25">
 </head>
 <body>
 
@@ -247,12 +247,16 @@
   <div class="file-card">
     <div class="file-head">
       <span id="file-name"></span>
+      <button id="file-src" class="mini-btn hidden" title="Toggle rendered / source">Source</button>
+      <a id="file-open" class="mini-btn hidden" target="_blank" rel="noopener" title="Open in a new tab">Open ↗</a>
       <a id="file-dl" class="mini-btn" download>Download</a>
       <button id="file-close" class="mini-btn">×</button>
     </div>
     <pre id="file-body"></pre>
     <img id="file-img" class="hidden" alt="">
     <div id="file-body-html" class="md hidden"></div>
+    <video id="file-video" class="hidden" controls playsinline preload="metadata"></video>
+    <iframe id="file-frame" class="hidden" sandbox="allow-scripts allow-forms allow-popups allow-modals allow-downloads" referrerpolicy="no-referrer"></iframe>
   </div>
 </div>
 <div id="snip-modal" class="modal hidden">
@@ -368,6 +372,6 @@
 <script src="/vendor/addon-search.js"></script>
 <script src="/vendor/addon-web-links.js"></script>
 <script src="/vendor/addon-unicode11.js"></script>
-<script src="/app.js?v=33"></script>
+<script src="/app.js?v=34"></script>
 </body>
 </html>

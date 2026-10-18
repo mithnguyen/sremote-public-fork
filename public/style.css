@@ -544,7 +544,12 @@ body.light .dev-warn { color: #a16207; }
 body.touch-ui .fp-ins, body.touch-ui .fp-act { opacity: .85; }
 
 /* ---------- file preview: image + markdown ---------- */
-#file-body.hidden, #file-img.hidden, #file-body-html.hidden { display: none; }
+#file-body.hidden, #file-img.hidden, #file-body-html.hidden, #file-video.hidden, #file-frame.hidden { display: none; }
+#file-open { text-decoration: none; color: var(--fg-dim); font-size: 12.5px; padding: 3px 8px; border-radius: 5px; }
+#file-open:hover { color: var(--fg); background: rgba(255,255,255,.06); }
+#file-video { flex: 1; min-height: 0; width: 100%; background: #000; outline: none; }
+#file-video.audio { flex: 0 0 auto; height: 54px; margin: auto 16px; width: calc(100% - 32px); background: transparent; }
+#file-frame { flex: 1; min-height: 0; width: 100%; border: 0; background: #fff; }
 #file-img { flex: 1; min-height: 0; max-width: 100%; object-fit: contain; align-self: center; padding: 12px;
   background: repeating-conic-gradient(#232c3a 0 25%, #161d28 0 50%) 0 0/18px 18px; }
 body.light #file-img { background: repeating-conic-gradient(#dfe4ec 0 25%, #f4f6f9 0 50%) 0 0/18px 18px; }

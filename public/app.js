@@ -1839,6 +1839,20 @@ $("#fp-upload").onclick = () => { attachDir = fpPath || "."; $("#attach-file").c
 // ---------- file preview ----------
 const fileModal = $("#file-modal");
 const IMG_EXT = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "ico", "bmp", "avif"]);
+const VIDEO_EXT = new Set(["mp4", "m4v", "webm", "mov", "mkv", "ogv"]);
+const AUDIO_EXT = new Set(["mp3", "m4a", "aac", "wav", "ogg", "oga", "opus", "flac"]);
+const FRAME_EXT = new Set(["html", "htm", "pdf"]);
+// /raw/<base>/<path> — path-style so html previews resolve relative assets
+function rawUrl(base, rel) {
+  const p = String(rel).replace(/\\/g, "/");
+  return `/raw/${encodeURIComponent(base)}/` + p.split("/").filter(Boolean).map(encodeURIComponent).join("/");
+}
+const fileVideo = $("#file-video"), fileFrame = $("#file-frame"), fileSrcBtn = $("#file-src"), fileOpen = $("#file-open");
+let fileSrcShow = null; // () => shows source of the current html file, set by openFile
+function stopFileMedia() {
+  fileVideo.pause(); fileVideo.removeAttribute("src"); fileVideo.load();
+  if (fileFrame.getAttribute("src")) fileFrame.src = "about:blank";
+}
 // tiny markdown renderer — escape first, then fences/inline/headers/lists
 function mdLite(src) {
   const inline = (t) => esc(t)
@@ -1874,10 +1888,43 @@ async function openFile(rel, it, base = fpRoot) {
   dl.href = url + "&dl=1";
   dl.download = it.name;
   const preEl = $("#file-body"), imgEl = $("#file-img"), mdEl = $("#file-body-html");
-  for (const el of [preEl, imgEl, mdEl]) el.classList.add("hidden");
+  stopFileMedia();
+  for (const el of [preEl, imgEl, mdEl, fileVideo, fileFrame, fileSrcBtn, fileOpen]) el.classList.add("hidden");
   fileModal.classList.remove("hidden");
   const ext = (it.name.includes(".") ? it.name.split(".").pop() : "").toLowerCase();
   if (IMG_EXT.has(ext)) { imgEl.src = url; imgEl.alt = it.name; imgEl.classList.remove("hidden"); return; }
+  if (VIDEO_EXT.has(ext) || AUDIO_EXT.has(ext)) {
+    fileVideo.classList.toggle("audio", AUDIO_EXT.has(ext));
+    fileVideo.src = url; fileVideo.classList.remove("hidden");
+    fileOpen.href = url; fileOpen.classList.remove("hidden");
+    fileVideo.onerror = () => {
+      if (fileModal.classList.contains("hidden") || !fileVideo.getAttribute("src")) return;
+      fileVideo.classList.add("hidden");
+      preEl.textContent = `This browser can't play .${ext} files — use Download.`; preEl.classList.remove("hidden");
+    };
+    fileVideo.play().catch(() => {}); // autoplay may be blocked; controls stay
+    return;
+  }
+  if (FRAME_EXT.has(ext)) {
+    const raw = rawUrl(base, rel);
+    fileFrame.src = raw; fileFrame.classList.remove("hidden");
+    fileOpen.href = raw; fileOpen.classList.remove("hidden");
+    if (ext !== "pdf") {
+      fileSrcBtn.textContent = "Source"; fileSrcBtn.classList.remove("hidden");
+      fileSrcShow = async () => {
+        const src = fileFrame.classList.toggle("hidden");
+        fileSrcBtn.textContent = src ? "Preview" : "Source";
+        preEl.classList.toggle("hidden", !src);
+        if (src && !preEl.dataset.loaded) {
+          preEl.textContent = "loading…";
+          try { const r = await fetch(url + "&head=1"); preEl.textContent = await r.text(); preEl.dataset.loaded = "1"; }
+          catch (e) { preEl.textContent = "Failed to load: " + e.message; }
+        }
+      };
+      delete preEl.dataset.loaded;
+    }
+    return;
+  }
   if (ext === "md" || ext === "markdown") {
     mdEl.innerHTML = "loading…"; mdEl.classList.remove("hidden");
     try {
@@ -1899,6 +1946,10 @@ async function openFile(rel, it, base = fpRoot) {
   } catch (e) { preEl.textContent = "Failed to load: " + e.message; }
 }
 $("#file-close").onclick = () => fileModal.classList.add("hidden");
+fileSrcBtn.onclick = () => fileSrcShow && fileSrcShow();
+// every close path (×, backdrop, Esc, Back) just hides the modal — stop playback there
+new MutationObserver(() => { if (fileModal.classList.contains("hidden")) stopFileMedia(); })
+  .observe(fileModal, { attributes: true, attributeFilter: ["class"] });
 fileModal.onclick = (e) => { if (e.target === fileModal) fileModal.classList.add("hidden"); };
 
 // ---------- git diff viewer ----------
@@ -2048,7 +2099,7 @@ let fxSel = new Set(), fxSortKey = "", fxSortAsc = true, fxAnchor = -1;
 let fxClip = null, fxSuppressTap = false; // {op:"copy"|"move", paths:[abs...]}
 
 const ARCH_RE = /\.(zip|7z|rar|jar|war|tar|tgz|tbz2|txz|tar\.gz|tar\.bz2|tar\.xz|gz|bz2|xz|cab)$/i;
-const MEDIA_EXT = new Set(["mp3","wav","ogg","flac","mp4","mkv","avi","mov","webm"]);
+const MEDIA_EXT = new Set(["mp3","wav","ogg","flac","mp4","mkv","avi","mov","webm","m4v","m4a","aac","opus","oga","ogv"]);
 const EXEC_EXT = new Set(["exe","msi","bat","cmd","ps1","com","appx","msix"]);
 function fxJoin(dir, name) {
   const sep = /[\\:]/.test(dir) ? "\\" : "/";
