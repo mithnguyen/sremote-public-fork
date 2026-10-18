@@ -17,6 +17,11 @@
 </p>
 
 <p align="center">
+  <b>☕ Ủng hộ tác giả cốc cafe mua token</b><br>
+  <img src="docs/donate-qr.png" width="220" alt="Mã QR chuyển khoản ủng hộ tác giả (VietQR · MB)">
+</p>
+
+<p align="center">
   <img src="docs/screenshots/hero.png" alt="One live terminal session on the workstation, continued from an office laptop's browser and from a phone" width="100%">
 </p>
 
