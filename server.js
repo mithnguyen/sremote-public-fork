@@ -150,6 +150,7 @@ function onHostMsg(m) {
     case "out": {
       const s = sessions.get(m.id); if (!s) break;
       s.lastOut = Date.now(); activityDirty = true;
+      logAppend(s, m.data);
       const out = JSON.stringify({ type: "out", id: m.id, data: m.data });
       for (const ws of s.clients) if (ws.readyState === 1) ws.send(out);
       break;
@@ -159,11 +160,13 @@ function onHostMsg(m) {
       s.exited = true;
       const out = JSON.stringify({ type: "exit", id: m.id, code: m.code });
       for (const ws of s.clients) if (ws.readyState === 1) ws.send(out);
+      logWake(s);
       break;
     }
     case "attached": {
       const ws = pendingAttach.get(m.tok);
       pendingAttach.delete(m.tok);
+      if (typeof ws === "function") { ws(m); break; }   // agent-API log seed, not a viewer
       if (!ws || ws.readyState !== 1) break;
       const s = sessions.get(m.id);
       if (s) s.exited = !!m.exited;
@@ -220,6 +223,49 @@ function reattachAll() {
   }
 }
 
+// ---------- agent API: plain-text output log per session ----------
+// REST consumers (public/cli/sremote.js, agents) read output by absolute char
+// offset instead of holding a WS. ANSI is stripped; tail capped like the host scrollback.
+const LOG_MAX = 256 * 1024;
+const ANSI_SRC = "\\x1b\\[[0-?]*[ -/]*[@-~]|\\x1b\\][^\\x07\\x1b]*(?:\\x07|\\x1b\\\\)|\\x1b[PX^_][^\\x1b]*\\x1b\\\\|\\x1b[ -/]+[0-~]|\\x1b[@-Z\\\\-_]";
+const ANSI_RE = new RegExp(ANSI_SRC, "g"), ANSI_ONE = new RegExp(`^(?:${ANSI_SRC})`);
+const plainText = (d) => d.replace(ANSI_RE, "").replace(/\r+\n/g, "\n").replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "");
+function logAppend(s, data) {
+  let d = (s.logPend || "") + data;
+  s.logPend = "";
+  // an escape sequence split across PTY chunks would leak "[31m" — hold it back
+  const k = d.lastIndexOf("\x1b");
+  if (k >= 0 && d.length - k < 256 && !ANSI_ONE.test(d.slice(k))) { s.logPend = d.slice(k); d = d.slice(0, k); }
+  const t = plainText(d);
+  if (!t) return;
+  const L = s.log || (s.log = { text: "", base: 0 });
+  L.text += t;
+  if (L.text.length > LOG_MAX) { const cut = L.text.length - LOG_MAX; L.text = L.text.slice(cut); L.base += cut; }
+  logWake(s);
+}
+function logWake(s) {
+  if (!s.waiters) return;
+  for (const w of s.waiters) w();
+  s.waiters.clear();
+}
+const logEnd = (s) => (s.log ? s.log.base + s.log.text.length : 0);
+// sessions that predate this server process have no log yet — seed it once from
+// the broker's scrollback (outs that arrived before the reply are inside it).
+// Exited sessions are skipped: a broker attach would respawn them.
+function withLog(s, cb) {
+  if (s.logSeeded || s.exited || !hostSock) { s.logSeeded = true; return cb(); }
+  const tok = ++attachTok;
+  const done = (m) => {
+    if (s.logSeeded) return;
+    s.logSeeded = true;
+    if (m && m.data) { s.log = null; s.logPend = ""; logAppend(s, m.data); }
+    cb();
+  };
+  pendingAttach.set(tok, done);
+  hostSend({ op: "attach", id: s.id, tok });
+  setTimeout(() => { pendingAttach.delete(tok); done(null); }, 3000);
+}
+
 function createSession({ shell = "powershell", cwd, cols = 120, rows = 32, workspace, name }) {
   const id = `s${Date.now().toString(36)}-${++seq}`;
   const wsp = workspace ? workspaceById(workspace) : null;
@@ -228,7 +274,7 @@ function createSession({ shell = "powershell", cwd, cols = 120, rows = 32, works
   const sess = {
     id, name: String(name || "").trim().slice(0, 60) || (wsp ? wsp.name : `${shell} ${seq}`),
     shell, cwd: dir, workspace: wsp ? wsp.id : null,
-    createdAt: Date.now(), exited: false, clients: new Set(),
+    createdAt: Date.now(), exited: false, clients: new Set(), logSeeded: true,
   };
   sessions.set(id, sess);
   hostSend({ op: "create", id, name: sess.name, shell, cwd: dir, workspace: sess.workspace, cols, rows });
@@ -810,6 +856,48 @@ const server = http.createServer((req, res) => {
   const m = /^\/api\/sessions\/([\w-]+)$/.exec(url.pathname);
   if (m && req.method === "DELETE") {
     res.writeHead(killSession(m[1]) ? 200 : 404); return res.end();
+  }
+  // agent API: type into a session / read its plain-text output by offset
+  const am = /^\/api\/sessions\/([\w-]+)\/(input|output)$/.exec(url.pathname);
+  if (am) {
+    const s = sessions.get(am[1]);
+    if (!s) return jsonErr(res, 404, "no such session");
+    const json = (o) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(o)); };
+    if (am[2] === "input" && req.method === "POST") {
+      return readBody(req, res, (b) => withLog(s, () => {
+        // {data} = raw keystrokes; {line} = text + Enter
+        const data = typeof b.line === "string" ? b.line + "\r" : typeof b.data === "string" ? b.data : "";
+        if (!data) return jsonErr(res, 400, "need data or line");
+        if (s.exited) return jsonErr(res, 409, "session exited");
+        const offset = logEnd(s);           // output caused by this input starts here
+        hostSend({ op: "in", id: s.id, data });
+        json({ offset });
+      }));
+    }
+    if (am[2] === "output" && req.method === "GET") {
+      return withLog(s, () => {
+        const q = url.searchParams;
+        const wait = Math.min(60000, Math.max(0, +q.get("wait") || 0));
+        const reply = () => {
+          const L = s.log || { text: "", base: 0 }, end = L.base + L.text.length;
+          let since = q.has("since") ? +q.get("since") || 0 : L.base;
+          if (q.has("tail")) since = Math.max(since, end - (+q.get("tail") || 0));
+          const from = Math.max(L.base, Math.min(since, end));
+          json({ data: L.text.slice(from - L.base), since: from, next: end, base: L.base,
+            truncated: since < L.base, exited: !!s.exited });
+        };
+        const since = q.has("since") ? +q.get("since") || 0 : -1;
+        if (!wait || s.exited || since < 0 || since < logEnd(s)) return reply();
+        // long-poll: hold until new output, exit or timeout
+        const waiters = s.waiters || (s.waiters = new Set());
+        let t = null;
+        const fire = () => { clearTimeout(t); waiters.delete(fire); if (!res.writableEnded) reply(); };
+        t = setTimeout(fire, wait);
+        waiters.add(fire);
+        res.on("close", () => { clearTimeout(t); waiters.delete(fire); });   // req "close" fires early on GET
+      });
+    }
+    return jsonErr(res, 405, "method not allowed");
   }
 
   // static — no-cache + etag so mobile browsers never hold stale UI

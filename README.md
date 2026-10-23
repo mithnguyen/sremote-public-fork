@@ -182,6 +182,23 @@ WantedBy=multi-user.target
 
 A native client — hosts list, live session notifications, and the web UI in a full-screen view with keyboard handling and file downloads. Grab the APK from the [releases](https://github.com/thsangyk-oss/sremote/releases) page (latest APK ships with v1.11.3). Any mobile browser works too.
 
+### CLI / agents
+
+Let a coding agent (or a script) on another tailnet machine open and drive sessions on this host — they show up live in the web UI, so you can watch or take over. No deps, Node 18+:
+
+```bash
+curl -o sremote.js http://<host>:2209/cli/sremote.js
+export SREMOTE_HOST=<host>                       # tailscale IP / MagicDNS name
+id=$(node sremote.js new --cwd 'C:\proj' --name agent-task)
+node sremote.js run $id -- git status            # waits, prints output, exits with its code
+node sremote.js send $id npm run dev             # fire and forget
+node sremote.js wait $id --for "ready in"        # block until output matches
+node sremote.js key $id ctrl-c
+node sremote.js kill $id
+```
+
+REST underneath: `POST /api/sessions/:id/input` and `GET /api/sessions/:id/output?since=&wait=` (plain text, long-poll).
+
 ---
 
 ## How it works
