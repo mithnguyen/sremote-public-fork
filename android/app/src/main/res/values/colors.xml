@@ -1,16 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- window background follows day/night (dynamic on Android 12+, see values-v31) -->
-    <color name="bg">#FBF8FF</color>
-    <color name="accent">#4C5C92</color>
+    <!-- brand palette shared with the web UI (glass theme): blue → violet gradient on ink -->
+    <color name="bg">#F5F7FB</color>
+    <color name="accent">#6D5EF5</color>
     <!-- launcher icon keeps its dark brand tile regardless of theme -->
-    <color name="launcher_bg">#0A0D12</color>
+    <color name="launcher_bg">#0B0F14</color>
     <!-- home screen widget -->
-    <color name="widget_bg">#F2F0F7</color>
-    <color name="widget_chip">#E4E1EC</color>
-    <color name="widget_fg">#1B1B21</color>
-    <color name="widget_dim">#5E5E6A</color>
-    <color name="widget_run">#4C5C92</color>
+    <color name="widget_bg">#F7F8FC</color>
+    <color name="widget_brd">#DDE3EE</color>
+    <color name="widget_chip">#EBEEF6</color>
+    <color name="widget_fg">#0F172A</color>
+    <color name="widget_dim">#55627A</color>
+    <color name="widget_run">#6D5EF5</color>
     <color name="widget_ask">#8A5A00</color>
     <color name="widget_done">#1E7A3A</color>
 </resources>

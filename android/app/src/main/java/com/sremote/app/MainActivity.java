@@ -47,6 +47,8 @@ import java.util.Map;
 
 public class MainActivity extends Activity {
     static final String ACTION_OPEN_HOST = "com.sremote.app.OPEN_HOST";
+    /** widget / shortcut → straight into a host's remote desktop */
+    static final String ACTION_OPEN_SCREEN = "com.sremote.app.OPEN_SCREEN";
     private static final int REQ_NOTIF = 42;
     private static final long RESCAN_MS = 30_000, POLL_MS = 10_000, RECENT_DONE_MS = 10 * 60_000;
     private static final int TAB_HOME = 0, TAB_SESSIONS = 1, TAB_ACTIVITY = 2, TAB_SETTINGS = 3;
@@ -72,6 +74,7 @@ public class MainActivity extends Activity {
     private LinearLayout homeStats, banners, attention, hostList, machineList, sessChips, sessList,
             activityList, activityChips, settingsBody;
     private TextView greeting, machinesStatus;
+    private FrameLayout tsSlot;
 
     /** polled liveness + session list per host */
     private static final class HStat { boolean online; long ms; String platform = ""; JSONArray sessions; }
@@ -106,6 +109,7 @@ public class MainActivity extends Activity {
         store = new HostStore(this);
         ui = new Ui(this);
         ui.applyWindow(this, ui.surface);
+        getWindow().setNavigationBarColor(navColor());
         buildShell();
         reload();
         selectTab(TAB_HOME);
@@ -120,10 +124,14 @@ public class MainActivity extends Activity {
 
     /** launcher shortcut → open that host directly */
     private void handleIntent(Intent i) {
-        if (i == null || !ACTION_OPEN_HOST.equals(i.getAction())) return;
+        if (i == null) return;
+        boolean screen = ACTION_OPEN_SCREEN.equals(i.getAction());
+        if (!screen && !ACTION_OPEN_HOST.equals(i.getAction())) return;
         Host h = store.find(i.getStringExtra(HostActivity.EXTRA_HOST_ID));
-        if (h != null) Actions.openTerminal(this, h, null);
+        if (h != null) Actions.openTerminal(this, h, screen ? "screen" : null);
     }
+
+    private int navColor() { return ui.dark ? 0xFF0A0E16 : 0xFFFFFFFF; }
 
     @Override protected void onStart() { super.onStart(); LockGate.onStart(); }
     @Override protected void onStop() { LockGate.onStop(); super.onStop(); }
@@ -166,14 +174,17 @@ public class MainActivity extends Activity {
     // ---------------- shell: pages + bottom navigation + FAB ----------------
     private void buildShell() {
         FrameLayout root = new FrameLayout(this);
-        root.setBackgroundColor(ui.surface);
+        root.setBackground(ui.backdrop());
 
         LinearLayout col = ui.vcol();
         content = new FrameLayout(this);
         col.addView(content, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
 
+        View hair = new View(this); // glass edge above the nav, like the web's borders
+        hair.setBackgroundColor(ui.outlineVariant);
+        col.addView(hair, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1));
         LinearLayout nav = ui.hrow();
-        nav.setBackgroundColor(ui.container);
+        nav.setBackgroundColor(navColor());
         nav.setPadding(0, dp(10), 0, dp(14));
         String[] labels = {"Home", "Sessions", "Activity", "Settings"};
         int[] icons = {R.drawable.ic_home, R.drawable.ic_list, R.drawable.ic_bell, R.drawable.ic_tune};
@@ -190,6 +201,7 @@ public class MainActivity extends Activity {
             it.addView(pill, new LinearLayout.LayoutParams(dp(64), dp(32)));
             TextView lb = ui.text(labels[i], 12, ui.onSurfaceVariant, true);
             lb.setPadding(0, dp(4), 0, 0);
+            lb.setGravity(Gravity.CENTER_HORIZONTAL);
             it.addView(lb);
             it.setOnClickListener(v -> selectTab(idx));
             nav.addView(it, Ui.weight1());
@@ -207,10 +219,10 @@ public class MainActivity extends Activity {
         // extended FAB: Add host
         LinearLayout f = ui.hrow();
         f.setPadding(dp(16), dp(14), dp(20), dp(14));
-        f.setBackground(ui.ripple(ui.round(ui.primaryContainer, 16), 16));
-        f.setElevation(dp(6));
-        f.addView(ui.icon(R.drawable.ic_add, ui.onPrimaryContainer, 24));
-        TextView fl = ui.text("Add host", 15, ui.onPrimaryContainer, true);
+        f.setBackground(ui.ripple(ui.grad(18), 18));
+        f.setElevation(dp(8));
+        f.addView(ui.icon(R.drawable.ic_add, ui.onPrimary, 24));
+        TextView fl = ui.text("Add host", 15, ui.onPrimary, true);
         fl.setPadding(dp(10), 0, 0, 0);
         f.addView(fl);
         f.setOnClickListener(v -> Actions.hostEditor(this, null, h -> { reload(); pollHosts(); }));
@@ -232,8 +244,8 @@ public class MainActivity extends Activity {
             FrameLayout pill = (FrameLayout) it.getChildAt(0);
             ImageView ic = (ImageView) pill.getChildAt(0);
             TextView lb = (TextView) it.getChildAt(1);
-            pill.setBackground(on ? ui.round(ui.secondaryContainer, 16) : null);
-            ic.setImageTintList(android.content.res.ColorStateList.valueOf(on ? ui.onSecondaryContainer : ui.onSurfaceVariant));
+            pill.setBackground(on ? ui.gradSoft(16) : null);
+            ic.setImageTintList(android.content.res.ColorStateList.valueOf(on ? ui.primary : ui.onSurfaceVariant));
             lb.setTextColor(on ? ui.onSurface : ui.onSurfaceVariant);
         }
         fab.setVisibility(t == TAB_HOME ? View.VISIBLE : View.GONE);
@@ -283,11 +295,24 @@ public class MainActivity extends Activity {
         ImageView refresh = ui.iconButton(R.drawable.ic_refresh, ui.onSurfaceVariant);
         refresh.setContentDescription("Refresh");
         refresh.setOnClickListener(v -> { ui.haptic(v); pollHosts(); scanTailnet(); refreshBanners(); });
-        greeting = ui.text("", 14, ui.onSurfaceVariant, false);
-        greeting.setPadding(dp(4), dp(16), 0, 0);
-        body.addView(greeting);
-        LinearLayout h = header("S-remote", refresh);
-        h.setPadding(dp(4), 0, 0, dp(8));
+        // brand header: gradient "S-remote" like the web, tailnet toggle on the right
+        LinearLayout h = ui.hrow();
+        h.setPadding(dp(4), dp(16), 0, dp(10));
+        FrameLayout logo = new FrameLayout(this);
+        logo.setBackground(ui.stroke(0xFF0B0F14, 12, ui.dark ? 0x668B7BFF : 0x998B7BFF));
+        logo.setElevation(dp(3));
+        logo.addView(ui.icon(R.drawable.ic_terminal, Ui.G1, 22), new FrameLayout.LayoutParams(dp(22), dp(22), Gravity.CENTER));
+        h.addView(logo, new LinearLayout.LayoutParams(dp(42), dp(42)));
+        LinearLayout tc = ui.vcol();
+        tc.setPadding(dp(12), 0, dp(8), 0);
+        TextView brand = Ui.gradientText(ui.text("S-remote", 24, ui.onSurface, true));
+        tc.addView(brand);
+        greeting = ui.oneLine(ui.text("", 13, ui.onSurfaceVariant, false));
+        tc.addView(greeting);
+        h.addView(tc, Ui.weight1());
+        tsSlot = new FrameLayout(this);
+        h.addView(tsSlot);
+        h.addView(refresh);
         body.addView(h);
 
         homeStats = ui.hrow();
@@ -468,10 +493,6 @@ public class MainActivity extends Activity {
         if (st == null && wsUp == null) top.addView(ui.pill("Checking…", ui.onSurfaceVariant, ui.containerHigh));
         else if (online) top.addView(ui.pill(st != null && st.ms > 0 ? st.ms + " ms" : "Online", ui.ok, ui.okContainer));
         else top.addView(ui.pill("Offline", ui.err, ui.errContainer));
-        ImageView term = ui.iconButton(R.drawable.ic_terminal, ui.primary);
-        term.setContentDescription("Open terminal");
-        term.setOnClickListener(v -> Actions.openTerminal(this, h, null));
-        top.addView(term);
         card.addView(top);
 
         List<SessionItem> live = new ArrayList<>();
@@ -510,12 +531,34 @@ public class MainActivity extends Activity {
             more.setPadding(dp(14), dp(8), 0, 0);
             card.addView(more);
         }
+
+        // one-tap actions: what the web UI offers from its home screen
+        LinearLayout acts = ui.hrow();
+        acts.setPadding(0, dp(12), 0, 0);
+        View t = ui.actionChip(R.drawable.ic_terminal, "Terminal", true);
+        t.setOnClickListener(v -> Actions.openTerminal(this, h, null));
+        acts.addView(t, ui.margins(0, 0, 8, 0));
+        View d = ui.actionChip(R.drawable.ic_desktop, "Desktop", false);
+        d.setOnClickListener(v -> Actions.openScreen(this, h));
+        acts.addView(d, ui.margins(0, 0, 8, 0));
+        View f = ui.actionChip(R.drawable.ic_folder, "Files", false);
+        f.setOnClickListener(v -> Actions.openFiles(this, h, null, null, null));
+        acts.addView(f, ui.margins(0, 0, 8, 0));
+        View n = ui.actionChip(R.drawable.ic_add, "New", false);
+        n.setOnClickListener(v -> Actions.newSession(this, h, null));
+        acts.addView(n);
+        HorizontalScrollView hs = new HorizontalScrollView(this);
+        hs.setHorizontalScrollBarEnabled(false);
+        hs.addView(acts);
+        card.addView(hs);
         return card;
     }
 
     /** Tailscale + monitoring banners */
     private void refreshBanners() {
         if (banners == null) return;
+        tsSlot.removeAllViews();
+        tsSlot.addView(Actions.tailnetChip(this, ui, () -> { refreshBanners(); pollHosts(); }));
         banners.removeAllViews();
         if (!Tailscale.installed(this)) {
             banners.addView(banner(R.drawable.ic_shield, ui.err, ui.errContainer, "Tailscale not installed",
@@ -523,8 +566,8 @@ public class MainActivity extends Activity {
                     v -> Tailscale.openPlayStore(this)));
         } else if (Tailscale.tailnetIp(this) == null && !Tailscale.vpnUp(this)) {
             banners.addView(banner(R.drawable.ic_shield, ui.warn, ui.warnContainer, "Tailscale is off",
-                    "Connect to your tailnet to reach your hosts.", "Open Tailscale",
-                    v -> Tailscale.openApp(this)));
+                    "Your hosts are only reachable over your tailnet. Switch it on from here.", "Connect",
+                    v -> Actions.connectTailscale(this, ok -> { refreshBanners(); pollHosts(); })));
         } else {
             if (System.currentTimeMillis() - lastScan > RESCAN_MS) scanTailnet();
         }
@@ -1024,18 +1067,22 @@ public class MainActivity extends Activity {
 
         settingsBody.addView(ui.label("Tailscale"));
         LinearLayout g3 = group();
-        String tsSub;
-        TextView tsBtn;
         if (!Tailscale.installed(this)) {
-            tsSub = "Not installed"; tsBtn = ui.tonalButton("Get");
-            tsBtn.setOnClickListener(v -> Tailscale.openPlayStore(this));
+            TextView get = ui.tonalButton("Get");
+            get.setOnClickListener(v -> Tailscale.openPlayStore(this));
+            g3.addView(ui.settingRow("Tailscale", "Not installed — S-remote reaches your PCs through it", get));
         } else {
             String ip = Tailscale.tailnetIp(this);
-            tsSub = ip != null ? "Connected · " + ip : Tailscale.vpnUp(this) ? "VPN connected" : "Not connected";
-            tsBtn = ui.tonalButton("Open");
-            tsBtn.setOnClickListener(v -> Tailscale.openApp(this));
+            boolean up = ip != null || Tailscale.vpnUp(this);
+            g3.addView(switchRow("Tailscale VPN", up ? "Connected" + (ip != null ? " · " + ip : "") : "Off — hosts are unreachable",
+                    up, (v, on) -> {
+                        if (on) Actions.connectTailscale(this, ok -> buildSettings());
+                        else Actions.disconnectTailscale(this, this::buildSettings);
+                    }));
+            g3.addView(switchRow("Connect automatically", "Switch Tailscale on when you open a host while it's off",
+                    store.tsAutoConnect(), (v, on) -> store.setTsAutoConnect(on)));
+            g3.addView(clickRow("Open Tailscale app", "Sign in, pick an exit node, see your devices", v -> Tailscale.openApp(this)));
         }
-        g3.addView(ui.settingRow("Tailscale", tsSub, tsBtn));
         settingsBody.addView(g3);
 
         settingsBody.addView(ui.label("Backup"));

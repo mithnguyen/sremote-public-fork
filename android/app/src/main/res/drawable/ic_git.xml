@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- branch glyph: two commits on a trunk + a merged side branch -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
+    <path android:strokeColor="#FFFFFFFF" android:strokeWidth="2" android:strokeLineCap="round" android:fillColor="#00000000"
+        android:pathData="M7,7.5v9 M17,9.5c0,4 -10,2.5 -10,7"/>
+    <path android:strokeColor="#FFFFFFFF" android:strokeWidth="2" android:fillColor="#00000000"
+        android:pathData="M7,1.5a2.5,2.5 0 1,1 -0.01,0z M7,16.5a2.5,2.5 0 1,1 -0.01,0z M17,4.5a2.5,2.5 0 1,1 -0.01,0z"/>
+</vector>

@@ -44,11 +44,32 @@ final class Api {
         JSONObject info;  // /api/info body
     }
 
-    private static String get(String url) throws Exception {
-        try (Response r = http.newCall(new Request.Builder().url(url).build()).execute()) {
-            if (!r.isSuccessful() || r.body() == null) throw new Exception("HTTP " + r.code());
-            return r.body().string();
+    /** archive / diff / upload work can take minutes */
+    static final OkHttpClient slow = http.newBuilder()
+            .readTimeout(15, TimeUnit.MINUTES)
+            .writeTimeout(0, TimeUnit.MILLISECONDS)
+            .build();
+
+    private static String get(String url) throws Exception { return get(http, url); }
+
+    private static String get(OkHttpClient cl, String url) throws Exception {
+        try (Response r = cl.newCall(new Request.Builder().url(url).build()).execute()) {
+            return body(r);
         }
+    }
+
+    /** body on success; on failure the server's {error} message when it sent one */
+    private static String body(Response r) throws Exception {
+        String b = r.body() != null ? r.body().string() : "";
+        if (r.isSuccessful()) return b;
+        String msg = null;
+        try { msg = new JSONObject(b).optString("error", null); } catch (Exception ignored) {}
+        throw new Exception(msg != null && !msg.isEmpty() ? msg : "HTTP " + r.code());
+    }
+
+    static String enc(String s) {
+        try { return java.net.URLEncoder.encode(s == null ? "" : s, "UTF-8").replace("+", "%20"); }
+        catch (Exception e) { return ""; }
     }
 
     private static <T> void run(Cb<T> cb, Task<T> t) {
@@ -89,11 +110,94 @@ final class Api {
         });
     }
 
+    // ---------- files / git / dev servers ----------
+    /** base: "ws:<id>" (workspace-jailed) | "@abs" (whole filesystem, absolute paths) */
+    static void files(Host h, String base, String path, Cb<JSONObject> cb) {
+        run(cb, () -> new JSONObject(get(h.url + "/api/files?base=" + enc(base) + "&path=" + enc(path))));
+    }
+
+    /** drives + quick access folders (the explorer's "Locations" page) */
+    static void browse(Host h, String path, Cb<JSONObject> cb) {
+        run(cb, () -> new JSONObject(get(h.url + "/api/browse?path=" + enc(path))));
+    }
+
+    static String fileUrl(Host h, String base, String path, boolean download) {
+        return h.url + "/api/file?base=" + enc(base) + "&path=" + enc(path) + (download ? "&dl=1" : "");
+    }
+
+    /** path-style url so html previews resolve their relative assets */
+    static String rawUrl(Host h, String base, String path) {
+        StringBuilder b = new StringBuilder(h.url).append("/raw/").append(enc(base));
+        if (path.startsWith("/")) b.append('/'); // unix absolute: empty first segment keeps the leading slash
+        for (String seg : path.replace('\\', '/').split("/")) if (!seg.isEmpty()) b.append('/').append(enc(seg));
+        return b.toString();
+    }
+
+    /** first 512 KB as text, for previews */
+    static void textHead(Host h, String base, String path, Cb<String> cb) {
+        run(cb, () -> get(fileUrl(h, base, path, false) + "&head=1"));
+    }
+
+    /** POST /api/fileop {base, op, path, name?, dest?} → server reply ({} | {dir} | {zip}) */
+    static void fileop(Host h, JSONObject b, Cb<JSONObject> cb) {
+        run(cb, () -> {
+            Request r = new Request.Builder().url(h.url + "/api/fileop")
+                    .post(RequestBody.create(b.toString(), JSON)).build();
+            try (Response res = slow.newCall(r).execute()) { return new JSONObject(body(res)); }
+        });
+    }
+
+    /** stream a picked document into <base>/<dir>/name */
+    static void upload(android.content.Context c, Host h, String base, String dir, android.net.Uri uri, String name, Cb<JSONObject> cb) {
+        run(cb, () -> {
+            android.content.ContentResolver cr = c.getContentResolver();
+            String mime = cr.getType(uri);
+            RequestBody rb = new RequestBody() {
+                @Override public MediaType contentType() {
+                    return MediaType.parse(mime != null ? mime : "application/octet-stream");
+                }
+                @Override public void writeTo(okio.BufferedSink sink) throws java.io.IOException {
+                    try (java.io.InputStream in = cr.openInputStream(uri)) {
+                        if (in == null) throw new java.io.IOException("can't read " + name);
+                        sink.writeAll(okio.Okio.source(in));
+                    }
+                }
+            };
+            String url = h.url + "/api/upload?base=" + enc(base) + "&name=" + enc(name)
+                    + (dir != null ? "&dir=" + enc(dir) : "");
+            try (Response res = slow.newCall(new Request.Builder().url(url).post(rb).build()).execute()) {
+                return new JSONObject(body(res));
+            }
+        });
+    }
+
+    static void git(Host h, String base, Cb<JSONObject> cb) {
+        run(cb, () -> new JSONObject(get(h.url + "/api/git?base=" + enc(base))));
+    }
+
+    static void gitDiff(Host h, String base, Cb<JSONObject> cb) {
+        run(cb, () -> new JSONObject(get(slow, h.url + "/api/gitdiff?base=" + enc(base))));
+    }
+
+    /** listening TCP ports on the host: [{port, addr, pid, loopback, proc}] */
+    static void devports(Host h, Cb<JSONArray> cb) {
+        run(cb, () -> {
+            JSONArray a = new JSONObject(get(h.url + "/api/devports")).optJSONArray("ports");
+            return a != null ? a : new JSONArray();
+        });
+    }
+
     /** POST /api/sessions → new session id */
     static void createSession(Host h, String workspace, String shell, String name, Cb<String> cb) {
+        createSession(h, workspace, shell, name, null, cb);
+    }
+
+    /** cwd: absolute start dir for a standalone session (ignored when workspace is set) */
+    static void createSession(Host h, String workspace, String shell, String name, String cwd, Cb<String> cb) {
         run(cb, () -> {
             JSONObject b = new JSONObject();
             if (workspace != null) b.put("workspace", workspace);
+            if (cwd != null && !cwd.isEmpty()) b.put("cwd", cwd);
             if (shell != null) b.put("shell", shell);
             if (name != null && !name.isEmpty()) b.put("name", name);
             Request r = new Request.Builder().url(h.url + "/api/sessions")

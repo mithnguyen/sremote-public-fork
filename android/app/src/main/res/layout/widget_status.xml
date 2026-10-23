@@ -33,6 +33,17 @@
             android:layout_height="wrap_content"
             android:textColor="@color/widget_dim"
             android:textSize="12sp" />
+        <!-- one tap into the first host's remote desktop -->
+        <ImageView
+            android:id="@+id/w_desk"
+            android:layout_width="34dp"
+            android:layout_height="30dp"
+            android:layout_marginStart="8dp"
+            android:background="@drawable/widget_chip"
+            android:contentDescription="Remote desktop"
+            android:padding="6dp"
+            android:src="@drawable/ic_desktop"
+            android:tint="@color/widget_run" />
     </LinearLayout>
 
     <LinearLayout

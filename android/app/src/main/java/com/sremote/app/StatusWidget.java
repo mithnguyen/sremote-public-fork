@@ -72,6 +72,15 @@ public class StatusWidget extends AppWidgetProvider {
                 new Intent(c, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         v.setOnClickPendingIntent(R.id.w_root, pi);
+        if (hosts.isEmpty()) v.setViewVisibility(R.id.w_desk, android.view.View.GONE);
+        else {
+            v.setViewVisibility(R.id.w_desk, android.view.View.VISIBLE);
+            v.setOnClickPendingIntent(R.id.w_desk, PendingIntent.getActivity(c, 0x3e,
+                    new Intent(c, MainActivity.class).setAction(MainActivity.ACTION_OPEN_SCREEN)
+                            .putExtra(HostActivity.EXTRA_HOST_ID, hosts.get(0).id)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP),
+                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE));
+        }
         m.updateAppWidget(ids, v);
     }
 }

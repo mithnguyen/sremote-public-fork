@@ -53,6 +53,10 @@
             android:exported="false" />
 
         <activity
+            android:name=".FilesActivity"
+            android:exported="false" />
+
+        <activity
             android:name=".OnboardingActivity"
             android:exported="false"
             android:windowSoftInputMode="adjustResize" />

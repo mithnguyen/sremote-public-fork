@@ -1,12 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="bg">#121318</color>
-    <color name="accent">#B9C3FF</color>
-    <color name="widget_bg">#1E1F25</color>
-    <color name="widget_chip">#2B2C33</color>
-    <color name="widget_fg">#E3E1E9</color>
-    <color name="widget_dim">#A9A8B3</color>
-    <color name="widget_run">#B9C3FF</color>
-    <color name="widget_ask">#F5C26B</color>
-    <color name="widget_done">#7DDC8E</color>
+    <color name="bg">#070A10</color>
+    <color name="accent">#8B7BFF</color>
+    <color name="widget_bg">#EE0F1420</color>
+    <color name="widget_brd">#2A3346</color>
+    <color name="widget_chip">#1A2232</color>
+    <color name="widget_fg">#E6EDF3</color>
+    <color name="widget_dim">#94A3B8</color>
+    <color name="widget_run">#A99CFF</color>
+    <color name="widget_ask">#FBBF24</color>
+    <color name="widget_done">#34D399</color>
 </resources>

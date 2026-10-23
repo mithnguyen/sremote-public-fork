@@ -10,11 +10,14 @@ import android.net.LinkProperties;
 import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.net.Uri;
+import android.os.Handler;
+import android.os.Looper;
 
 import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.NetworkInterface;
 import java.util.Enumeration;
+import java.util.function.Consumer;
 
 public final class Tailscale {
     public static final String PKG = "com.tailscale.ipn";
@@ -90,6 +93,16 @@ public final class Tailscale {
         return false;
     }
 
+    /** host reached through the tailnet (100.64/10, *.ts.net, bare MagicDNS name) — LAN / public hosts don't need it */
+    public static boolean viaTailnet(Host h) {
+        String hp = h.hostPort();
+        String host = hp.startsWith("[") ? hp : hp.replaceFirst(":\\d+$", "");
+        if (isTailscaleV4(host)) return true;
+        String l = host.toLowerCase(java.util.Locale.ROOT);
+        if (l.endsWith(".ts.net")) return true;
+        return !l.contains(".") && !l.contains(":") && !l.equals("localhost");
+    }
+
     public static boolean isTailscaleV4(String ip) {
         String[] p = ip.split("\\.");
         if (p.length != 4) return false;
@@ -115,5 +128,55 @@ public final class Tailscale {
         if (i == null) return false;
         c.startActivity(i);
         return true;
+    }
+
+    // ---------- remote control of the official app ----------
+    // Tailscale's exported IPNReceiver takes CONNECT_VPN / DISCONNECT_VPN (the
+    // same hook Tasker uses), so the tunnel can be toggled without leaving
+    // S-remote. Needs a one-time login + VPN consent inside Tailscale itself.
+    private static final String RECEIVER = PKG + ".IPNReceiver";
+    static final String CONNECT = PKG + ".CONNECT_VPN", DISCONNECT = PKG + ".DISCONNECT_VPN";
+
+    /** tunnel looks up (tailnet address, or any VPN when addresses are redacted) */
+    public static boolean up(Context c) { return tailnetIp(c) != null || vpnUp(c); }
+
+    private static boolean send(Context c, String action) {
+        if (!installed(c)) return false;
+        try {
+            c.sendBroadcast(new Intent(action).setClassName(PKG, RECEIVER));
+            return true;
+        } catch (Exception e) { return false; }
+    }
+
+    public static boolean connect(Context c) { return send(c, CONNECT); }
+    public static boolean disconnect(Context c) { return send(c, DISCONNECT); }
+
+    /**
+     * ask Tailscale to connect, then poll until the tunnel shows up or the
+     * timeout passes; {@code done} runs on the main thread with the outcome
+     */
+    public static void connectThen(Context c, long timeoutMs, Consumer<Boolean> done) {
+        if (up(c)) { done.accept(true); return; }
+        if (!connect(c)) { done.accept(false); return; }
+        waitFor(c, true, timeoutMs, done);
+    }
+
+    public static void disconnectThen(Context c, long timeoutMs, Consumer<Boolean> done) {
+        if (!disconnect(c)) { done.accept(false); return; }
+        waitFor(c, false, timeoutMs, done);
+    }
+
+    private static void waitFor(Context c, boolean wantUp, long timeoutMs, Consumer<Boolean> done) {
+        Context app = c.getApplicationContext();
+        Handler h = new Handler(Looper.getMainLooper());
+        long until = System.currentTimeMillis() + timeoutMs;
+        h.postDelayed(new Runnable() {
+            @Override public void run() {
+                boolean u = up(app);
+                if (u == wantUp) { done.accept(true); return; }
+                if (System.currentTimeMillis() > until) { done.accept(false); return; }
+                h.postDelayed(this, 350);
+            }
+        }, 300);
     }
 }

@@ -133,8 +133,10 @@ public class HostActivity extends Activity {
         hint.setPadding(0, 0, 0, dp(20));
         TextView retry = ui.filledButton("Retry");
         retry.setOnClickListener(v -> { errView.setVisibility(View.GONE); web.loadUrl(url); });
-        TextView ts = ui.textButton("Open Tailscale");
-        ts.setOnClickListener(v -> { if (!Tailscale.openApp(this)) Tailscale.openPlayStore(this); });
+        TextView ts = ui.textButton("Connect Tailscale");
+        ts.setOnClickListener(v -> Actions.connectTailscale(this, ok -> {
+            if (ok) { errView.setVisibility(View.GONE); web.loadUrl(url); }
+        }));
         err.addView(eh); err.addView(errDetail); err.addView(hint); err.addView(retry);
         err.addView(ts, ui.margins(0, 8, 0, 0));
         errView = err;
@@ -201,21 +203,22 @@ public class HostActivity extends Activity {
         Host h = hostId != null ? store.find(hostId) : null;
         boolean keep = store.keepScreenOn();
         ui.menuSheet(this, name,
-                new String[]{"Reload", "New session", "Host details", keep ? "Let screen sleep" : "Keep screen on",
+                new String[]{"Reload", "New session", "Files", "Host details", keep ? "Let screen sleep" : "Keep screen on",
                         "Open in browser", "Copy address"},
-                new int[]{R.drawable.ic_refresh, R.drawable.ic_add, R.drawable.ic_info, R.drawable.ic_moon,
+                new int[]{R.drawable.ic_refresh, R.drawable.ic_add, R.drawable.ic_folder, R.drawable.ic_info, R.drawable.ic_moon,
                         R.drawable.ic_open, R.drawable.ic_copy},
                 i -> {
                     switch (i) {
                         case 0: errView.setVisibility(View.GONE); web.reload(); break;
                         case 1: if (h != null) Actions.newSession(this, h, null); break;
-                        case 2: if (h != null) Actions.openDetail(this, h); break;
-                        case 3: store.setKeepScreenOn(!keep); applyKeepScreen(); break;
-                        case 4:
+                        case 2: if (h != null) Actions.openFiles(this, h, null, null, null); break;
+                        case 3: if (h != null) Actions.openDetail(this, h); break;
+                        case 4: store.setKeepScreenOn(!keep); applyKeepScreen(); break;
+                        case 5:
                             try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url))); }
                             catch (ActivityNotFoundException ignored) {}
                             break;
-                        case 5:
+                        case 6:
                             android.content.ClipboardManager cm = getSystemService(android.content.ClipboardManager.class);
                             cm.setPrimaryClip(android.content.ClipData.newPlainText("S-remote", url));
                             Toast.makeText(this, "Copied " + url, Toast.LENGTH_SHORT).show();

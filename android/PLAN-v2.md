@@ -168,9 +168,40 @@ Detector                + tail(n) để preview
 - Widget cập nhật phụ thuộc MonitorService; không có monitor → widget tĩnh.
 - Không có emulator trên máy build → chỉ verify compile + javac test + kiểm APK; báo rõ cho user.
 
+## 5b. Bản 2.1.0 — bắt kịp web UI + bật Tailscale trong app
+
+- [x] Giao diện thương hiệu giống web (glass theme): bảng màu cố định ink + gradient xanh→tím trong
+      `Ui` (bỏ dynamic color), `Ui.backdrop()` (nền có quầng sáng), `glass()` (thẻ viền mảnh),
+      `grad()`/`gradSoft()` (nút chính, chip đang chọn, tab đang chọn), `gradientText()` (chữ
+      "S-remote"), `section()` có vạch gradient, `actionChip()`. Icon launcher = logo web.
+- [x] Tailscale điều khiển từ app: `Tailscale.connect/disconnect/connectThen` gửi broadcast
+      `com.tailscale.ipn.CONNECT_VPN|DISCONNECT_VPN` tới `com.tailscale.ipn/.IPNReceiver` (exported,
+      không cần quyền) rồi poll tới khi VPN lên. `Actions.ensureTailnet` tự bật khi mở host
+      (pref `ts_auto`, mặc định bật), `Actions.tailnetChip` (header Home), Settings có switch VPN +
+      "Connect automatically", banner / trang lỗi terminal / onboarding có nút "Connect".
+      Yêu cầu: app Tailscale đã đăng nhập và cấp quyền VPN 1 lần.
+- [x] `FilesActivity` (native explorer): base `ws:<id>` hoặc `@abs` (trang Locations = Quick access +
+      Projects + Drives từ `/api/browse`), breadcrumb, lọc, xem trước (ảnh/video/audio/html qua
+      WebView, text qua `?head=1`), tải về (DownloadManager), tải lên nhiều file (`/api/upload`, stream
+      từ SAF), đổi tên / xoá / giải nén / nén zip / thư mục mới (`/api/fileop`), "Open terminal here"
+      (POST `/api/sessions` với `cwd`), mở web explorer (`#fx=`).
+- [x] `GitDiff`: diff tô màu (`/api/gitdiff`), stat + từng file, cắt ở 4000 dòng.
+- [x] `HostDetailActivity` kiểu sidebar web: hero + 4 action (Terminal / Desktop / Files / New),
+      thẻ Project (nhánh git + số file đổi → diff, pill trạng thái, bấm để mở rộng: session + Open /
+      New / Files / Changes), Standalone sessions, Dev servers (`/api/devports`, mở trong trình duyệt,
+      cổng loopback gắn "PC only").
+- [x] Thẻ host trên Home: hàng nút Terminal / Desktop / Files / New. Session row dùng `lastOut` của
+      server để hiện "active" / "output Xm ago" khi monitor tắt.
+- [x] Remote desktop 1 chạm: nút trên widget (host đầu tiên), shortcut launcher "Desktop",
+      `MainActivity.ACTION_OPEN_SCREEN`.
+- [x] Version 2.1.0 (versionCode 11).
+- [x] Build debug + smoke test trên emulator API 34 (máy ADMIN): Home, Host detail (projects/git/dev servers), Files (locations, duyệt, preview text), Git diff, Terminal WebView, Settings — 0 crash. Sửa khi test: nhãn bottom nav lệch trái; dev servers lọc cổng hệ thống + gộp trùng như web; chỉ hỏi bật Tailscale với host tailnet (100.64/10, *.ts.net, tên MagicDNS); dòng đầu git --stat bị lệch.
+- [ ] Build release (ký bằng keystore trên máy User) + test máy thật, nhất là bật/tắt Tailscale (emulator không có app Tailscale).
+
 ## 6. Việc còn lại / ý tưởng tiếp theo
 
 - Test trên máy thật: sheet (bàn phím đè ô nhập?), widget trên nhiều launcher, quiet hours qua nửa đêm,
   theme override (light khi hệ thống dark), deep-link khi server chưa cập nhật (phải degrade về Home).
 - Pull-to-refresh trên Home/Sessions (hiện dùng nút refresh + poll 10s).
-- Files / Git native cho workspace (API `/api/files`, `/api/git` đã có sẵn).
+- Nhận file "Share to S-remote" từ app khác (ACTION_SEND) → chọn host/thư mục → upload.
+- Copy / move file giữa thư mục trong FilesActivity (`fileop copy|move` đã có ở server).

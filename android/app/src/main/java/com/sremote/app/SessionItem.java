@@ -14,7 +14,7 @@ final class SessionItem {
     final String id;
     String name, cwd = "", workspace, shell = "", line = "", question;
     boolean exited, live;   // live = state comes from the monitor
-    long createdAt, since;
+    long createdAt, since, lastOut;  // lastOut: server's last-output time (works without the monitor)
     Detector.State state = Detector.State.IDLE;
 
     SessionItem(Host h, String id) { host = h; this.id = id; }
@@ -35,6 +35,7 @@ final class SessionItem {
                 it.shell = o.optString("shell", "");
                 it.exited = o.optBoolean("exited");
                 it.createdAt = o.optLong("createdAt");
+                it.lastOut = o.optLong("lastOut");
                 it.since = it.createdAt;
                 if (it.exited) it.state = Detector.State.EXITED;
                 overlay(it, liveById.remove(it.id));
@@ -71,6 +72,9 @@ final class SessionItem {
             default: return 3;
         }
     }
+
+    /** output in the last few seconds — the web UI's "busy" state, available without the monitor */
+    boolean busy() { return !exited && lastOut > 0 && System.currentTimeMillis() - lastOut < 5_000; }
 
     String subtitle() {
         if (state == Detector.State.QUESTION && question != null) return question.replace('\n', ' ');

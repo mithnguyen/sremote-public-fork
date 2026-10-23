@@ -101,6 +101,10 @@ public class HostStore {
     public boolean keepScreenOn() { return sp.getBoolean("keep_screen_on", false); }
     public void setKeepScreenOn(boolean v) { sp.edit().putBoolean("keep_screen_on", v).apply(); }
 
+    /** turn Tailscale on by itself when a host is opened while the tunnel is down */
+    public boolean tsAutoConnect() { return sp.getBoolean("ts_auto", true); }
+    public void setTsAutoConnect(boolean v) { sp.edit().putBoolean("ts_auto", v).apply(); }
+
     public boolean onboarded() { return sp.getBoolean("onboarded", false); }
     public void setOnboarded(boolean v) { sp.edit().putBoolean("onboarded", v).apply(); }
 

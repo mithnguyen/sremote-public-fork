@@ -34,7 +34,7 @@ public class OnboardingActivity extends Activity {
         ui.applyWindow(this, ui.surface);
 
         LinearLayout root = ui.vcol();
-        root.setBackgroundColor(ui.surface);
+        root.setBackground(ui.backdrop());
         root.setPadding(dp(24), dp(16), dp(24), dp(20));
 
         LinearLayout top = ui.hrow();
@@ -85,7 +85,7 @@ public class OnboardingActivity extends Activity {
         dots.removeAllViews();
         for (int i = 0; i < STEPS; i++) {
             View d = new View(this);
-            d.setBackground(ui.round(i == step ? ui.primary : ui.outlineVariant, 4));
+            d.setBackground(i == step ? ui.grad(4) : ui.round(ui.outlineVariant, 4));
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(i == step ? 24 : 8), dp(8));
             lp.setMargins(0, 0, dp(6), 0);
             dots.addView(d, lp);
@@ -102,8 +102,8 @@ public class OnboardingActivity extends Activity {
 
     private void hero(int icon, int fg, int bg, String title, String text) {
         FrameLayout ic = new FrameLayout(this);
-        ic.setBackground(ui.oval(bg));
-        ic.addView(ui.icon(icon, fg, 40), new FrameLayout.LayoutParams(dp(40), dp(40), Gravity.CENTER));
+        ic.setBackground(ui.gradSoft(44));
+        ic.addView(ui.icon(icon, ui.primary, 40), new FrameLayout.LayoutParams(dp(40), dp(40), Gravity.CENTER));
         LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(dp(88), dp(88));
         ilp.gravity = Gravity.CENTER_HORIZONTAL;
         body.addView(ic, ilp);
@@ -137,8 +137,11 @@ public class OnboardingActivity extends Activity {
                 : ui.pill("Not installed", ui.err, ui.errContainer);
         body.addView(centered(pill));
         if (!up) {
-            TextView b = ui.tonalButton(inst ? "Open Tailscale" : "Get Tailscale on Google Play");
-            b.setOnClickListener(v -> { if (!inst || !Tailscale.openApp(this)) Tailscale.openPlayStore(this); });
+            TextView b = inst ? ui.filledButton("Connect Tailscale") : ui.tonalButton("Get Tailscale on Google Play");
+            b.setOnClickListener(v -> {
+                if (inst) Actions.connectTailscale(this, ok -> render());
+                else Tailscale.openPlayStore(this);
+            });
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
             lp.gravity = Gravity.CENTER_HORIZONTAL;
             lp.topMargin = dp(16);

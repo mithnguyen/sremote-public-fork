@@ -8,7 +8,6 @@ import android.graphics.Typeface;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
-import android.os.Build;
 import android.text.TextUtils;
 import android.view.Gravity;
 import android.view.View;
@@ -36,65 +35,31 @@ final class Ui {
         dark = HostStore.THEME_DARK.equals(mode) || (!HostStore.THEME_LIGHT.equals(mode)
                 && (ctx.getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK)
                 == Configuration.UI_MODE_NIGHT_YES);
-        if (Build.VERSION.SDK_INT >= 31) {
-            if (dark) {
-                surface = sys(android.R.color.system_neutral1_900);
-                container = sys(android.R.color.system_neutral1_800);
-                containerHigh = sys(android.R.color.system_neutral2_800);
-                onSurface = sys(android.R.color.system_neutral1_100);
-                onSurfaceVariant = sys(android.R.color.system_neutral2_200);
-                outline = sys(android.R.color.system_neutral2_400);
-                outlineVariant = sys(android.R.color.system_neutral2_700);
-                primary = sys(android.R.color.system_accent1_200);
-                onPrimary = sys(android.R.color.system_accent1_800);
-                primaryContainer = sys(android.R.color.system_accent1_700);
-                onPrimaryContainer = sys(android.R.color.system_accent1_100);
-                secondaryContainer = sys(android.R.color.system_accent2_700);
-                onSecondaryContainer = sys(android.R.color.system_accent2_100);
-                tertiaryContainer = sys(android.R.color.system_accent3_700);
-                onTertiaryContainer = sys(android.R.color.system_accent3_100);
-            } else {
-                surface = sys(android.R.color.system_neutral1_10);
-                container = sys(android.R.color.system_neutral1_50);
-                containerHigh = sys(android.R.color.system_neutral2_100);
-                onSurface = sys(android.R.color.system_neutral1_900);
-                onSurfaceVariant = sys(android.R.color.system_neutral2_700);
-                outline = sys(android.R.color.system_neutral2_500);
-                outlineVariant = sys(android.R.color.system_neutral2_200);
-                primary = sys(android.R.color.system_accent1_600);
-                onPrimary = sys(android.R.color.system_accent1_0);
-                primaryContainer = sys(android.R.color.system_accent1_100);
-                onPrimaryContainer = sys(android.R.color.system_accent1_900);
-                secondaryContainer = sys(android.R.color.system_accent2_100);
-                onSecondaryContainer = sys(android.R.color.system_accent2_900);
-                tertiaryContainer = sys(android.R.color.system_accent3_100);
-                onTertiaryContainer = sys(android.R.color.system_accent3_900);
-            }
-        } else if (dark) { // static M3 baseline (indigo seed)
-            surface = 0xFF121318; container = 0xFF1E1F25; containerHigh = 0xFF292A2F;
-            onSurface = 0xFFE3E1E9; onSurfaceVariant = 0xFFC6C5D0; outline = 0xFF90909A; outlineVariant = 0xFF45464F;
-            primary = 0xFFB9C3FF; onPrimary = 0xFF1F2C61; primaryContainer = 0xFF364379; onPrimaryContainer = 0xFFDDE1FF;
-            secondaryContainer = 0xFF424659; onSecondaryContainer = 0xFFDFE1F9;
-            tertiaryContainer = 0xFF5B3D57; onTertiaryContainer = 0xFFFFD7F3;
-        } else {
-            surface = 0xFFFBF8FF; container = 0xFFEFEDF4; containerHigh = 0xFFE9E7EF;
-            onSurface = 0xFF1B1B21; onSurfaceVariant = 0xFF46464F; outline = 0xFF767680; outlineVariant = 0xFFC6C5D0;
-            primary = 0xFF4C5C92; onPrimary = 0xFFFFFFFF; primaryContainer = 0xFFDCE1FF; onPrimaryContainer = 0xFF04174B;
-            secondaryContainer = 0xFFDFE1F9; onSecondaryContainer = 0xFF171B2C;
-            tertiaryContainer = 0xFFFFD7F3; onTertiaryContainer = 0xFF2C1229;
-        }
+        // brand palette shared with the web UI's glass theme (ink + blue→violet
+        // gradient) — fixed instead of dynamic so app and browser look the same
         if (dark) {
-            ok = 0xFF7DDC8E; okContainer = 0xFF1C3B24;
-            warn = 0xFFF5C26B; warnContainer = 0xFF45320B;
-            err = 0xFFFFB4AB; errContainer = 0xFF5C1A15;
+            surface = 0xFF070A10; container = 0xFF0F1521; containerHigh = 0xFF19202E;
+            onSurface = 0xFFE6EDF3; onSurfaceVariant = 0xFF94A3B8; outline = 0xFF64748B; outlineVariant = 0xFF232C3D;
+            primary = 0xFFA99CFF; onPrimary = 0xFFFFFFFF; primaryContainer = 0xFF252A52; onPrimaryContainer = 0xFFC7D2FE;
+            secondaryContainer = 0xFF18233A; onSecondaryContainer = 0xFFBFD7FF;
+            tertiaryContainer = 0xFF2A2149; onTertiaryContainer = 0xFFE0D4FF;
+            ok = 0xFF34D399; okContainer = 0xFF0E2B23;
+            warn = 0xFFFBBF24; warnContainer = 0xFF33270A;
+            err = 0xFFF87171; errContainer = 0xFF3A1519;
         } else {
-            ok = 0xFF1E7A3A; okContainer = 0xFFCDEFD3;
-            warn = 0xFF8A5A00; warnContainer = 0xFFFFE2B3;
+            surface = 0xFFF5F7FB; container = 0xFFFFFFFF; containerHigh = 0xFFEEF1F7;
+            onSurface = 0xFF0F172A; onSurfaceVariant = 0xFF55627A; outline = 0xFF8792A8; outlineVariant = 0xFFDDE3EE;
+            primary = 0xFF6D5EF5; onPrimary = 0xFFFFFFFF; primaryContainer = 0xFFE7E4FF; onPrimaryContainer = 0xFF2A1F8F;
+            secondaryContainer = 0xFFE2EDFF; onSecondaryContainer = 0xFF0B3D91;
+            tertiaryContainer = 0xFFF1E6FF; onTertiaryContainer = 0xFF4A1D80;
+            ok = 0xFF1E7A3A; okContainer = 0xFFD5F2DC;
+            warn = 0xFF8A5A00; warnContainer = 0xFFFFE9C2;
             err = 0xFFBA1A1A; errContainer = 0xFFFFDAD6;
         }
     }
 
-    private int sys(int res) { return c.getColor(res); }
+    // brand gradient stops (web: --grad)
+    static final int G1 = 0xFF5AA9FF, G2 = 0xFF8B7BFF, G3 = 0xFFB06BFF;
 
     int dp(float v) { return (int) (v * c.getResources().getDisplayMetrics().density + .5f); }
 
@@ -132,6 +97,68 @@ final class Ui {
         GradientDrawable g = new GradientDrawable();
         g.setShape(GradientDrawable.OVAL); g.setColor(color);
         return g;
+    }
+
+    /** blue → violet brand gradient (web --grad) */
+    GradientDrawable grad(float r) {
+        GradientDrawable g = new GradientDrawable(GradientDrawable.Orientation.TL_BR, new int[]{G1, G2, G3});
+        g.setCornerRadius(dp(r));
+        return g;
+    }
+
+    /** soft tinted gradient for highlighted surfaces (web --grad-soft) */
+    GradientDrawable gradSoft(float r) {
+        int a = dark ? 0x29000000 : 0x1F000000;
+        GradientDrawable g = new GradientDrawable(GradientDrawable.Orientation.TL_BR,
+                new int[]{(G1 & 0xFFFFFF) | a, (G2 & 0xFFFFFF) | a});
+        g.setCornerRadius(dp(r));
+        g.setStroke(dp(1), (G2 & 0xFFFFFF) | (dark ? 0x40000000 : 0x33000000));
+        return g;
+    }
+
+    /** glass card: surface container + hairline border, like .ws-card on the web */
+    GradientDrawable glass(float r) {
+        GradientDrawable g = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+                new int[]{dark ? 0xFF131A28 : container, container});
+        g.setCornerRadius(dp(r));
+        g.setStroke(dp(1), outlineVariant);
+        return g;
+    }
+
+    /** page background: ink with the web's faint violet / blue / green glows */
+    Drawable backdrop() {
+        int w = c.getResources().getDisplayMetrics().widthPixels;
+        int h = c.getResources().getDisplayMetrics().heightPixels;
+        android.graphics.drawable.ColorDrawable base = new android.graphics.drawable.ColorDrawable(surface);
+        int k = dark ? 1 : 0;
+        Drawable[] layers = {
+                base,
+                glow(0.92f, -0.06f, w * 1.0f, (G2 & 0xFFFFFF) | (k == 1 ? 0x2E000000 : 0x1C000000)),
+                glow(-0.08f, 0.10f, w * 0.85f, (G1 & 0xFFFFFF) | (k == 1 ? 0x24000000 : 0x16000000)),
+                glow(0.5f, 1.12f, Math.max(w, h * 0.6f), (k == 1 ? 0x1534D399 : 0x0F34D399)),
+        };
+        return new android.graphics.drawable.LayerDrawable(layers);
+    }
+
+    private static GradientDrawable glow(float cx, float cy, float radius, int color) {
+        GradientDrawable g = new GradientDrawable();
+        g.setGradientType(GradientDrawable.RADIAL_GRADIENT);
+        g.setColors(new int[]{color, color & 0x00FFFFFF});
+        g.setGradientCenter(cx, cy);
+        g.setGradientRadius(radius);
+        return g;
+    }
+
+    /** paint a TextView's glyphs with the brand gradient (web .brand-txt i) */
+    static TextView gradientText(TextView t) {
+        t.addOnLayoutChangeListener((v, l, tp, r, b, ol, ot, or, ob) -> {
+            float wpx = t.getPaint().measureText(t.getText().toString());
+            if (wpx <= 0) return;
+            t.getPaint().setShader(new android.graphics.LinearGradient(0, 0, wpx, 0,
+                    new int[]{G1, G2, G3}, null, android.graphics.Shader.TileMode.CLAMP));
+            t.invalidate();
+        });
+        return t;
     }
 
     Drawable ripple(Drawable content, float r) {
@@ -192,7 +219,7 @@ final class Ui {
         b.setGravity(Gravity.CENTER);
         b.setPadding(dp(24), dp(10), dp(24), dp(10));
         b.setMinHeight(dp(40));
-        b.setBackground(ripple(round(primary, 20), 20));
+        b.setBackground(ripple(grad(20), 20));
         return b;
     }
 
@@ -215,10 +242,10 @@ final class Ui {
 
     /** filter chip */
     TextView chip(CharSequence s, boolean selected) {
-        TextView t = text(s, 13, selected ? onSecondaryContainer : onSurfaceVariant, true);
+        TextView t = text(s, 13, selected ? onPrimaryContainer : onSurfaceVariant, true);
         t.setGravity(Gravity.CENTER);
         t.setPadding(dp(16), dp(7), dp(16), dp(7));
-        t.setBackground(ripple(selected ? round(secondaryContainer, 8) : stroke(0x00000000, 8, outlineVariant), 8));
+        t.setBackground(ripple(selected ? gradSoft(10) : stroke(0x00000000, 10, outlineVariant), 10));
         return t;
     }
 
@@ -252,7 +279,7 @@ final class Ui {
         LinearLayout l = new LinearLayout(c);
         l.setOrientation(LinearLayout.VERTICAL);
         l.setPadding(dp(16), dp(14), dp(16), dp(14));
-        l.setBackground(ripple(round(color, 24), 24));
+        l.setBackground(ripple(color == container ? glass(24) : round(color, 24), 24));
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         lp.setMargins(0, 0, 0, dp(10));
@@ -409,7 +436,11 @@ final class Ui {
     LinearLayout section(CharSequence title, View trailing) {
         LinearLayout h = hrow();
         h.setPadding(dp(4), dp(20), 0, dp(8));
+        View bar = new View(c);   // gradient tick before the label, like .home-label on the web
+        bar.setBackground(grad(2));
+        h.addView(bar, new LinearLayout.LayoutParams(dp(14), dp(3)));
         TextView t = text(title, 15, onSurface, true);
+        t.setPadding(dp(10), 0, 0, 0);
         h.addView(t, weight1());
         if (trailing != null) h.addView(trailing);
         return h;
@@ -441,7 +472,7 @@ final class Ui {
         LinearLayout e = vcol();
         e.setGravity(Gravity.CENTER_HORIZONTAL);
         e.setPadding(dp(24), dp(32), dp(24), dp(32));
-        e.setBackground(round(container, 24));
+        e.setBackground(glass(24));
         e.addView(icon(iconRes, primary, 40));
         TextView t = text(title, 17, onSurface, false);
         t.setGravity(Gravity.CENTER);
@@ -477,6 +508,20 @@ final class Ui {
         l.setPadding(0, dp(6), 0, 0);
         t.addView(l);
         return t;
+    }
+
+    /** small icon + label pill button (card quick actions); primary = gradient fill */
+    LinearLayout actionChip(int iconRes, CharSequence label, boolean primaryStyle) {
+        LinearLayout r = hrow();
+        r.setGravity(Gravity.CENTER);
+        r.setPadding(dp(10), dp(7), dp(12), dp(7));
+        int fg = primaryStyle ? onPrimary : onSurface;
+        r.setBackground(ripple(primaryStyle ? grad(12) : stroke(containerHigh, 12, outlineVariant), 12));
+        r.addView(icon(iconRes, primaryStyle ? onPrimary : primary, 16));
+        TextView t = oneLine(text(label, 13, fg, true));
+        t.setPadding(dp(6), 0, 0, 0);
+        r.addView(t);
+        return r;
     }
 
     void haptic(View v) {

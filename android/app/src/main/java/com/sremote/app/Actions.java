@@ -30,25 +30,127 @@ final class Actions {
     static void toast(Context c, String s) { Toast.makeText(c, s, Toast.LENGTH_SHORT).show(); }
 
     // ---------------- navigation ----------------
-    /** open the web terminal; hash = "s=<sid>" | "ws=<id>" | "screen" | null */
+    /** open the web terminal; hash = "s=<sid>" | "ws=<id>" | "screen" | "fx=<path>" | null */
     static void openTerminal(Activity a, Host h, String hash) {
-        Runnable go = () -> {
+        ensureTailnet(a, h, () -> {
             Intent i = new Intent(a, HostActivity.class);
             i.putExtra(HostActivity.EXTRA_HOST_ID, h.id);
             i.putExtra(HostActivity.EXTRA_NAME, h.name);
             i.putExtra(HostActivity.EXTRA_URL, h.url);
             if (hash != null) i.putExtra(HostActivity.EXTRA_HASH, hash);
             a.startActivity(i);
-        };
-        if (Tailscale.tailnetIp(a) == null && !Tailscale.vpnUp(a)) {
-            new AlertDialog.Builder(a, new Ui(a).dialogTheme())
-                    .setTitle("Tailscale seems off")
-                    .setMessage("No tailnet connection detected. Open " + h.name + " anyway?")
-                    .setPositiveButton("Open", (d, w) -> go.run())
-                    .setNeutralButton("Open Tailscale", (d, w) -> { if (!Tailscale.openApp(a)) Tailscale.openPlayStore(a); })
-                    .setNegativeButton("Cancel", null)
+        });
+    }
+
+    /** remote desktop: the web UI's screen page, one tap from anywhere */
+    static void openScreen(Activity a, Host h) { openTerminal(a, h, "screen"); }
+
+    /** native file browser; base = "ws:<id>" | "@abs", path = start dir (null = default) */
+    static void openFiles(Activity a, Host h, String base, String path, String title) {
+        ensureTailnet(a, h, () -> {
+            Intent i = new Intent(a, FilesActivity.class).putExtra(HostActivity.EXTRA_HOST_ID, h.id);
+            if (base != null) i.putExtra(FilesActivity.EXTRA_BASE, base);
+            if (path != null) i.putExtra(FilesActivity.EXTRA_PATH, path);
+            if (title != null) i.putExtra(FilesActivity.EXTRA_TITLE, title);
+            a.startActivity(i);
+        });
+    }
+
+    /** host file → phone Downloads/ via the system download manager */
+    static void download(Context c, String url, String fileName) {
+        try {
+            android.app.DownloadManager.Request r = new android.app.DownloadManager.Request(android.net.Uri.parse(url));
+            r.setTitle(fileName);
+            r.setDescription("S-remote");
+            r.setNotificationVisibility(android.app.DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+            r.setDestinationInExternalPublicDir(android.os.Environment.DIRECTORY_DOWNLOADS, fileName);
+            c.getSystemService(android.app.DownloadManager.class).enqueue(r);
+            toast(c, "Downloading " + fileName);
+        } catch (Exception e) { toast(c, "Download failed: " + e.getMessage()); }
+    }
+
+    static void openUrl(Context c, String url) {
+        try { c.startActivity(new Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); }
+        catch (Exception e) { toast(c, "No app can open " + url); }
+    }
+
+    /**
+     * run {@code go} once the tailnet is reachable: if the tunnel is down,
+     * switch Tailscale on from here (auto-connect) or ask what to do
+     */
+    static void ensureTailnet(Activity a, Host h, Runnable go) {
+        if (!Tailscale.viaTailnet(h) || Tailscale.up(a)) { go.run(); return; }
+        String what = h.name;
+        Ui ui = new Ui(a);
+        boolean inst = Tailscale.installed(a);
+        if (inst && new HostStore(a).tsAutoConnect()) { connectTailscale(a, ok -> go.run()); return; }
+        AlertDialog.Builder b = new AlertDialog.Builder(a, ui.dialogTheme())
+                .setTitle("Tailscale is off")
+                .setMessage(inst ? "Turn on Tailscale to reach " + what + "?"
+                        : "S-remote reaches your machines through Tailscale, which isn't installed on this phone.")
+                .setNegativeButton("Open anyway", (d, w) -> go.run());
+        if (inst) b.setPositiveButton("Connect", (d, w) -> connectTailscale(a, ok -> go.run()));
+        else b.setPositiveButton("Get Tailscale", (d, w) -> Tailscale.openPlayStore(a));
+        b.show();
+    }
+
+    /** CONNECT_VPN with a small progress dialog; falls back to opening Tailscale when it doesn't come up */
+    static void connectTailscale(Activity a, Consumer<Boolean> done) {
+        Ui ui = new Ui(a);
+        if (!Tailscale.installed(a)) { Tailscale.openPlayStore(a); if (done != null) done.accept(false); return; }
+        AlertDialog wait = new AlertDialog.Builder(a, ui.dialogTheme())
+                .setTitle("Connecting Tailscale…")
+                .setMessage("Asking the Tailscale app to switch on.")
+                .setCancelable(false).show();
+        Tailscale.connectThen(a, 9_000, ok -> {
+            if (a.isFinishing()) return;
+            wait.dismiss();
+            StateBus.changed();
+            if (ok) { toast(a, "Tailscale connected"); if (done != null) done.accept(true); return; }
+            new AlertDialog.Builder(a, ui.dialogTheme())
+                    .setTitle("Tailscale didn't connect")
+                    .setMessage("Open the Tailscale app once to sign in and allow the VPN — after that S-remote can switch it on by itself.")
+                    .setPositiveButton("Open Tailscale", (d, w) -> Tailscale.openApp(a))
+                    .setNegativeButton("Continue", (d, w) -> { if (done != null) done.accept(false); })
                     .show();
-        } else go.run();
+        });
+    }
+
+    static void disconnectTailscale(Activity a, Runnable after) {
+        new AlertDialog.Builder(a, new Ui(a).dialogTheme())
+                .setTitle("Turn off Tailscale?")
+                .setMessage("Hosts become unreachable and background monitoring pauses until it's back on.")
+                .setPositiveButton("Turn off", (d, w) -> Tailscale.disconnectThen(a, 6_000, ok -> {
+                    StateBus.changed();
+                    if (!ok) toast(a, "Tailscale is still on — open the app to turn it off");
+                    if (after != null) after.run();
+                }))
+                .setNegativeButton("Cancel", (d, w) -> { if (after != null) after.run(); })
+                .show();
+    }
+
+    /** compact tailnet status pill with a power toggle (Home header, terminal menu) */
+    static LinearLayout tailnetChip(Activity a, Ui ui, Runnable changed) {
+        LinearLayout r = ui.hrow();
+        r.setPadding(ui.dp(10), ui.dp(6), ui.dp(12), ui.dp(6));
+        boolean inst = Tailscale.installed(a);
+        String ip = inst ? Tailscale.tailnetIp(a) : null;
+        boolean up = inst && (ip != null || Tailscale.vpnUp(a));
+        int fg = up ? ui.ok : inst ? ui.warn : ui.err;
+        r.setBackground(ui.ripple(ui.stroke(up ? ui.okContainer : ui.containerHigh, 16, up ? (ui.ok & 0x55FFFFFF) : ui.outlineVariant), 16));
+        r.addView(ui.icon(R.drawable.ic_power, fg, 16));
+        TextView t = ui.oneLine(ui.text(up ? (ip != null ? ip : "Tailnet on") : inst ? "Tailscale off" : "No Tailscale", 12, up ? ui.ok : ui.onSurface, true));
+        t.setPadding(ui.dp(6), 0, 0, 0);
+        r.addView(t);
+        r.setContentDescription(up ? "Tailscale connected — tap to turn off" : "Turn on Tailscale");
+        r.setOnClickListener(v -> {
+            ui.haptic(v);
+            if (!inst) Tailscale.openPlayStore(a);
+            else if (up) disconnectTailscale(a, changed);
+            else connectTailscale(a, ok -> { if (changed != null) changed.run(); });
+        });
+        r.setOnLongClickListener(v -> { if (!Tailscale.openApp(a)) Tailscale.openPlayStore(a); return true; });
+        return r;
     }
 
     static void openDetail(Activity a, Host h) {
@@ -293,20 +395,21 @@ final class Actions {
         Ui ui = new Ui(a);
         HostStore store = new HostStore(a);
         ui.menuSheet(a, h.name,
-                new String[]{"Open terminal", "Remote desktop", "New session", "Host details",
+                new String[]{"Open terminal", "Remote desktop", "Files", "New session", "Host details",
                         h.notify ? "Mute notifications" : "Unmute notifications", "Add to home screen", "Edit", "Remove"},
-                new int[]{R.drawable.ic_terminal, R.drawable.ic_desktop, R.drawable.ic_add, R.drawable.ic_info,
+                new int[]{R.drawable.ic_terminal, R.drawable.ic_desktop, R.drawable.ic_folder, R.drawable.ic_add, R.drawable.ic_info,
                         R.drawable.ic_bell, R.drawable.ic_home, R.drawable.ic_edit, R.drawable.ic_delete},
                 i -> {
                     switch (i) {
                         case 0: openTerminal(a, h, null); break;
-                        case 1: openTerminal(a, h, "screen"); break;
-                        case 2: newSession(a, h, null); break;
-                        case 3: openDetail(a, h); break;
-                        case 4: h.notify = !h.notify; store.update(h); resyncMonitor(a); if (changed != null) changed.run(); break;
-                        case 5: pinShortcut(a, h); break;
-                        case 6: hostEditor(a, h, x -> { if (changed != null) changed.run(); }); break;
-                        case 7: confirmRemove(a, h, changed); break;
+                        case 1: openScreen(a, h); break;
+                        case 2: openFiles(a, h, null, null, null); break;
+                        case 3: newSession(a, h, null); break;
+                        case 4: openDetail(a, h); break;
+                        case 5: h.notify = !h.notify; store.update(h); resyncMonitor(a); if (changed != null) changed.run(); break;
+                        case 6: pinShortcut(a, h); break;
+                        case 7: hostEditor(a, h, x -> { if (changed != null) changed.run(); }); break;
+                        case 8: confirmRemove(a, h, changed); break;
                     }
                 }).show();
     }
@@ -343,7 +446,20 @@ final class Actions {
             if (sm == null) return;
             List<ShortcutInfo> list = new ArrayList<>();
             int max = Math.min(4, sm.getMaxShortcutCountPerActivity());
-            for (Host h : new HostStore(c).list()) { if (list.size() >= max) break; list.add(shortcutFor(c, h)); }
+            List<Host> hosts = new HostStore(c).list();
+            // first host's remote desktop takes one slot — it's the other thing people open daily
+            int forHosts = hosts.isEmpty() ? 0 : Math.max(1, max - 1);
+            for (Host h : hosts) { if (list.size() >= forHosts) break; list.add(shortcutFor(c, h)); }
+            if (!hosts.isEmpty() && list.size() < max) {
+                Host h = hosts.get(0);
+                Intent i = new Intent(c, MainActivity.class).setAction(MainActivity.ACTION_OPEN_SCREEN)
+                        .putExtra(HostActivity.EXTRA_HOST_ID, h.id).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                list.add(new ShortcutInfo.Builder(c, "screen-" + h.id)
+                        .setShortLabel("Desktop")
+                        .setLongLabel("Remote desktop · " + h.name)
+                        .setIcon(Icon.createWithResource(c, R.mipmap.ic_launcher))
+                        .setIntent(i).build());
+            }
             sm.setDynamicShortcuts(list);
         } catch (Exception ignored) {}
     }
@@ -359,19 +475,20 @@ final class Actions {
     static LinearLayout sessionRow(Activity a, Ui ui, SessionItem s, boolean showHost, Runnable changed) {
         LinearLayout r = ui.hrow();
         r.setPadding(ui.dp(12), ui.dp(10), ui.dp(10), ui.dp(10));
-        r.setBackground(ui.ripple(ui.round(ui.surface, 16), 16));
+        r.setBackground(ui.ripple(ui.stroke(ui.dark ? 0xFF0B1019 : ui.surface, 16, ui.outlineVariant), 16));
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
         lp.setMargins(0, ui.dp(6), 0, 0);
         r.setLayoutParams(lp);
-        r.addView(ui.dot(s.live || s.exited ? ui.stateColor(s.state) : ui.outlineVariant, 10));
+        r.addView(ui.dot(s.live || s.exited ? ui.stateColor(s.state) : s.busy() ? ui.ok : ui.outlineVariant, 10));
         LinearLayout tc = ui.vcol();
         tc.setPadding(ui.dp(12), 0, ui.dp(6), 0);
         LinearLayout nl = ui.hrow();
         nl.addView(ui.oneLine(ui.text(s.name, 14, ui.onSurface, true)), new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT, 0));
         String meta = (showHost ? "  ·  " + s.host.name : "")
-                + (s.live || s.exited ? "  ·  " + Ui.stateLabel(s.state) + " · " + Ui.ago(s.since) : "");
+                + (s.live || s.exited ? "  ·  " + Ui.stateLabel(s.state) + " · " + Ui.ago(s.since)
+                : s.busy() ? "  ·  active" : s.lastOut > 0 ? "  ·  output " + Ui.ago(s.lastOut) : "");
         if (!meta.isEmpty()) nl.addView(ui.oneLine(ui.text(meta, 12, s.live ? ui.stateColor(s.state) : ui.onSurfaceVariant, false)));
         tc.addView(nl);
         String sub = s.subtitle();
