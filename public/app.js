@@ -20,8 +20,10 @@ let currentWs = undefined;  // workspace id | null (standalone) | undefined (hom
 const panes = new Map();    // id -> {term, fit, el, attached, lastOutAt, idleNotified, title, search}
 let hostInfo = {};
 const unreadSess = new Set(); // sessions with unseen output (drives .tab.unread)
-let splitId = null;         // session id in the unfocused split pane (null = no split)
+let splitId = null;         // session id in the unfocused split pane — may live in ANY project (null = no split)
 let splitFocus = "left";    // which split side holds the focused (activeId) session
+let wantSplitForNew = false; // next "created" session goes to the guest pane instead of replacing focus
+const onScreen = (id) => id === activeId || (!!splitId && id === splitId); // visible right now → don't flag its output as unseen
 let fontSize = parseInt(localStorage.getItem("rd.font") || "14", 10) || 14;
 const TERM_THEMES = {
   dark:  { background: "#0d1117", foreground: "#e6edf3" },
@@ -125,7 +127,7 @@ function sessState(s) { // off | bell | busy | new | idle
   if (s.exited) return "off";
   if (notifiedSess.has(s.id)) return "bell";
   if (s.lastOut && Date.now() - s.lastOut < BUSY_MS) return "busy";
-  if (s.lastOut && s.lastOut > (seen[s.id] || s.createdAt || 0) + 1500 && s.id !== activeId) return "new";
+  if (s.lastOut && s.lastOut > (seen[s.id] || s.createdAt || 0) + 1500 && !onScreen(s.id)) return "new";
   return "idle";
 }
 const ST_TIP = { off: "exited", bell: "needs attention", busy: "running — output just now", new: "new output since you looked", idle: "idle" };
@@ -201,7 +203,8 @@ function connect() {
     switch (m.type) {
       case "sessions":
         sessions = m.list;
-        if (splitId && !inView(splitId)) { splitId = null; splitFocus = "left"; }
+        // the split partner may live in another project — only drop it when it's gone entirely
+        if (splitId && !sessions.some((x) => x.id === splitId)) { splitId = null; splitFocus = "left"; }
         renderAll();
         if (view === "work" && !inView(activeId)) {
           const vis = sessInView().filter((s) => !s.exited);
@@ -217,8 +220,8 @@ function connect() {
         if (p) {
           p.term.write(m.data);
           p.lastOutAt = Date.now(); p.idleNotified = false; // reset busy→quiet edge
-          if (m.id === activeId && document.visibilityState === "visible") { seen[m.id] = Date.now(); saveSeen(); }
-          if (m.id !== activeId) {
+          if (onScreen(m.id) && document.visibilityState === "visible") { seen[m.id] = Date.now(); saveSeen(); }
+          if (!onScreen(m.id)) {
             unreadSess.add(m.id);
             const t = tabsEl.querySelector(`[data-id="${m.id}"]`);
             if (t) t.classList.add("unread");
@@ -240,12 +243,15 @@ function connect() {
       }
       case "created": {
         // tag the new session into the current workspace client-side happens server-side
-        select(m.id);
+        if (wantSplitForNew) { wantSplitForNew = false; splitWith(m.id); }
+        else select(m.id);
         break;
       }
       case "activity": { // {id: lastOut} for all sessions, coalesced server-side
         for (const s of sessions) if (m.map[s.id]) s.lastOut = m.map[s.id];
-        if (activeId && m.map[activeId] && document.visibilityState === "visible") { seen[activeId] = m.map[activeId]; saveSeen(); }
+        if (document.visibilityState === "visible")
+          for (const vid of [activeId, splitId])
+            if (vid && m.map[vid]) { seen[vid] = m.map[vid]; saveSeen(); }
         refreshStates();
         break;
       }
@@ -283,7 +289,7 @@ function showView(v) {
 function enterWorkspace(wsId, pickId) {
   hidePjPop();
   currentWs = wsId;            // id | null (standalone)
-  splitId = null; splitFocus = "left";
+  splitId = null; splitFocus = "left"; wantSplitForNew = false;
   const w = wsId ? wsById(wsId) : null;
   if (w) w.lastUsed = Date.now();
   $("#nav-q").value = ""; navQ = "";
@@ -304,15 +310,20 @@ function enterWorkspace(wsId, pickId) {
   renderAll();
   if (fpVisible && fpRoot) fpNavigate("");
 }
-// open any session from anywhere (home, navigator, palette) — switches project if needed
+// open any session from anywhere (home, navigator, palette) — switches project if needed.
+// while split is on, a session from another project lands on the guest side,
+// focused — the chrome follows it instead of leaving the split
 function openSession(id) {
   const s = sessions.find((x) => x.id === id);
   if (!s) return;
   if (view === "work" && (currentWs ?? null) === sessWs(s)) select(id);
+  else if (view === "work" && splitId) splitWith(id, true);
   else enterWorkspace(sessWs(s), id);
 }
-// new terminal straight in a project, default shell, no dialog
+// new terminal straight in a project, default shell, no dialog.
+// while split is on it opens in the guest pane — your work is never replaced
 function quickNew(wsId) {
+  if (view === "work" && splitId) return newForSplit(wsId ? wsById(wsId) : null);
   if (view !== "work" || (currentWs ?? null) !== wsId) enterWorkspace(wsId);
   const shell = localStorage.getItem("rd.shell") || (hostInfo.shells || ["powershell"])[0];
   send({ type: "create", shell, cols: 120, rows: 32, ...(wsId ? { workspace: wsId } : { cwd: hostInfo.home }) });
@@ -321,7 +332,7 @@ function goHome() {
   if (history.state && history.state.sr === "work") { skipPop = true; history.back(); } // drop our entry
   view = "home";
   activeId = null;             // sessions keep running; panes stay attached
-  splitId = null; splitFocus = "left";
+  splitId = null; splitFocus = "left"; wantSplitForNew = false;
   termsEl.classList.remove("split");
   for (const p of panes.values()) p.el.classList.add("hidden");
   setTitle();
@@ -392,6 +403,7 @@ function ensurePane(id) {
   // scrollTop hacks no longer work; feed finger deltas to term.scrollLines.
   // Long-press (~450ms, no move) switches to select mode: synthesized mouse
   // events drive xterm's own drag-select; on release the selection is copied.
+  const WHEEL_STEP = 3; // swipe lines per synthesized wheel notch
   let tY = null, tAcc = 0, selMode = false, suppressCtx = false;
   let lpTimer = null, lpX = 0, lpY = 0;
   const linePx = () => {
@@ -423,14 +435,16 @@ function ensurePane(id) {
     const y = t.clientY, dy = tY - y;
     tY = y;
     if (!dy) return;
-    tAcc += dy / linePx();
+    // fullscreen TUIs (Claude Code: alt screen + mouse tracking) scroll
+    // themselves on wheel — our scrollback only holds stale redraw frames.
+    // Synthesize wheel events so xterm forwards them to the app. An app
+    // scrolls several lines per notch, so one notch per WHEEL_STEP lines swiped.
+    const wheel = term.modes.mouseTrackingMode !== "none" || term.buffer.active.type === "alternate";
+    tAcc += dy / (linePx() * (wheel ? WHEEL_STEP : 1));
     const n = Math.trunc(tAcc);
     if (!n) return;
     tAcc -= n;
-    // fullscreen TUIs (Claude Code: alt screen + mouse tracking) scroll
-    // themselves on wheel — our scrollback only holds stale redraw frames.
-    // Synthesize wheel events so xterm forwards them to the app.
-    if (term.modes.mouseTrackingMode !== "none" || term.buffer.active.type === "alternate") {
+    if (wheel) {
       for (let i = Math.abs(n); i--;)
         scrEl().dispatchEvent(new WheelEvent("wheel", {
           deltaY: Math.sign(n), deltaMode: WheelEvent.DOM_DELTA_LINE,
@@ -489,6 +503,8 @@ function sendSize(id, p) {
 }
 // split: activeId = focused session, splitId = the OTHER visible one.
 // Focused side renders activeId; the other side renders splitId.
+// splitId may live in a different project — activeId always stays in currentWs
+// because focusing a pane makes its session's project the current one.
 const leftPaneId  = () => (splitFocus === "left"  ? activeId : splitId);
 const rightPaneId = () => (splitFocus === "right" ? activeId : splitId);
 function layoutPanes() {
@@ -512,11 +528,60 @@ function layoutPanes() {
     pp.el.classList.toggle("hidden", !vis);
   }
 }
+// chrome (sidebar highlight, tabs, files, title) follows the focused session's
+// project — called after every focused↔guest swap
+function syncWsToActive() {
+  const s = sessions.find((x) => x.id === activeId);
+  const ws = s ? sessWs(s) : null;
+  if (ws === (currentWs ?? null)) return;
+  currentWs = ws;
+  const w = ws ? wsById(ws) : null;
+  if (w) w.lastUsed = Date.now();
+  $("#new-btn-ws").textContent = w ? `in ${w.name}` : "";
+  fpRoot = w ? `ws:${w.id}` : (s && s.cwd ? s.cwd : null);
+  fpPath = "";
+  setTitle();
+  if (fpVisible && fpRoot) fpNavigate("");
+}
+function swapFocus() { // focused ↔ guest session trade places (sides stay put)
+  splitFocus = splitFocus === "left" ? "right" : "left";
+  const t = activeId; activeId = splitId; splitId = t;
+  clearNotify(activeId); unreadSess.delete(activeId); touchMru(activeId); markSeen(activeId);
+  syncWsToActive();
+  if (mqNarrow.matches && sideVisible) { sideVisible = false; applyToggles(); } // drawer over a split is unusable
+  renderTabs(); renderSessions(); layoutPanes();
+}
 function focusSide(id) { // mousedown inside a split pane moves focus (and activeId) to it
   if (!splitId || id === activeId) return;
-  splitFocus = id === rightPaneId() ? "right" : "left";
-  const t = activeId; activeId = splitId; splitId = t; // swap: focused ↔ unfocused
-  renderTabs(); renderSessions(); layoutPanes();
+  swapFocus();
+}
+// put any session — from any project — on the unfocused side. Turns split on if
+// needed. focus=false keeps focus where it is (click the pane / its guest tab
+// to work in it); focus=true lands the session focused → chrome follows it
+function splitWith(id, focus = false) {
+  if (view !== "work" || !activeId || id === activeId) return;
+  if (id === splitId) { if (focus) focusSide(id); return; } // already the partner
+  const s = sessions.find((x) => x.id === id);
+  if (!s) return;
+  const p = ensurePane(id);
+  if (!splitId) splitFocus = "left";
+  splitId = id;
+  if (wsAlive && !p.attached) attach(id, p);
+  clearNotify(id); unreadSess.delete(id); touchMru(id); markSeen(id);
+  if (focus) focusSide(id); else { renderTabs(); renderSessions(); layoutPanes(); }
+  requestAnimationFrame(fitVisible);
+  const fp = panes.get(activeId); if (fp) fp.term.focus();
+}
+// new terminal created straight into the guest pane (project "+", modal, palette)
+function newForSplit(w) {
+  wantSplitForNew = true;
+  setTimeout(() => { wantSplitForNew = false; }, 8000); // create failed → don't eat a later "created"
+  const shell = localStorage.getItem("rd.shell") || (hostInfo.shells || ["powershell"])[0];
+  send({ type: "create", shell, cols: 120, rows: 32, ...(w ? { workspace: w.id } : { cwd: hostInfo.home }) });
+}
+function pickSplit() { // choose the guest session — any project
+  if (view !== "work" || !activeId) return toast("Open a session first", "err");
+  openPalette("split");
 }
 function fitVisible() { // fit + resize-send every visible pane
   const ids = splitId ? [leftPaneId(), rightPaneId()] : [activeId];
@@ -528,13 +593,14 @@ function fitVisible() { // fit + resize-send every visible pane
 function toggleSplit() {
   if (splitId) {
     splitId = null; splitFocus = "left";
-    layoutPanes();
+    renderTabs(); renderSessions(); layoutPanes();
     requestAnimationFrame(fitVisible);
     const p = panes.get(activeId); if (p) p.term.focus();
     return;
   }
+  if (!activeId) return toast("Need 2 sessions to split", "err");
   const next = sessInView().find((s) => s.id !== activeId);
-  if (!activeId || !next) return toast("Need 2 sessions to split", "err");
+  if (!next) return pickSplit(); // no partner in this project → pick anywhere
   splitId = next.id; splitFocus = "left";
   const sp = ensurePane(splitId);
   if (wsAlive && !sp.attached) attach(splitId, sp);
@@ -546,10 +612,7 @@ function select(id) {
   const s = sessions.find((x) => x.id === id);
   if (!s) return;
   if (splitId && id === splitId) { // picked the session already on the other side → just move focus
-    splitFocus = splitFocus === "left" ? "right" : "left";
-    const t = activeId; activeId = splitId; splitId = t;
-    clearNotify(id); unreadSess.delete(id); touchMru(id); markSeen(id);
-    renderTabs(); renderSessions(); layoutPanes();
+    swapFocus();
     const fp = panes.get(id); if (fp) fp.term.focus();
     return;
   }
@@ -572,7 +635,7 @@ function closeSession(id) {
   const p = panes.get(id);
   if (p) { p.term.dispose(); p.el.remove(); panes.delete(id); }
   unreadSess.delete(id);
-  if (splitId === id) { splitId = null; splitFocus = "left"; } // killed the split side → single view
+  if (splitId === id) { splitId = null; splitFocus = "left"; renderTabs(); } // killed the split side → single view
   if (activeId === id) {
     activeId = null;
     const rest = sessInView().filter((s) => s.id !== id);
@@ -696,7 +759,9 @@ function renderSessions() { // name kept: called all over — renders the naviga
       const list = q && p.ps < 0 ? p.hits.map((x) => x.s) : [...p.list].sort((a, b) => (a.exited - b.exited) || sessUsed(b) - sessUsed(a));
       for (const s of list) {
         const d = document.createElement("div");
-        d.className = "nav-sess" + (s.id === activeId && view === "work" ? " active" : "") + (s.exited ? " exited" : "");
+        d.className = "nav-sess" + (s.id === activeId && view === "work" ? " active" : "")
+          + (s.id === splitId && view === "work" ? " on-split" : "") + (s.exited ? " exited" : "");
+        if (s.id === splitId && view === "work") d.title = "Shown in split pane";
         d.dataset.sid = s.id;
         const ttl = sessTitle(s);
         d.innerHTML = `${dotHtml(s)}<span class="nav-stxt"><span class="nav-sname">${hl(s.name, q)}</span>${ttl ? `<span class="nav-ssub">${hl(ttl.slice(0, 60), q)}</span>` : ""}</span>${timeHtml(s)}`;
@@ -722,19 +787,24 @@ navQIn.addEventListener("keydown", (e) => {
 
 function renderTabs() {
   tabsEl.innerHTML = "";
-  for (const s of sessInView()) {
-    if (!panes.has(s.id)) continue;
+  const mk = (s, guest) => {
     const p = panes.get(s.id);
-    const ttl = (p && p.title ? p.title : "").slice(0, 24);
+    if (!p) return;
+    const ttl = (p.title || "").slice(0, 24);
+    const gw = guest ? wsById(sessWs(s)) : null;
     const t = document.createElement("div");
-    t.className = "tab" + (s.id === activeId ? " active" : "") + (s.exited ? " exited" : "") + (notifiedSess.has(s.id) ? " bell" : "") + (unreadSess.has(s.id) ? " unread" : "");
+    t.className = "tab" + (guest ? " guest" : "") + (s.id === activeId ? " active" : "") + (s.exited ? " exited" : "") + (notifiedSess.has(s.id) ? " bell" : "") + (unreadSess.has(s.id) ? " unread" : "");
     t.dataset.id = s.id;
-    t.title = p && p.title ? p.title : s.name;
-    t.innerHTML = `<span>${esc(s.name)}</span>${ttl ? `<span class="tab-ttl">${esc(ttl)}</span>` : ""}<span class="tab-x" title="kill">×</span>`;
+    t.title = (p.title || s.name) + (guest ? ` — ${gw ? gw.name : "Standalone"} (split)` : "");
+    t.innerHTML = `<span>${esc(s.name)}</span>${guest ? `<span class="tab-ws">${esc(gw ? gw.name : "Standalone")}</span>` : ""}${ttl ? `<span class="tab-ttl">${esc(ttl)}</span>` : ""}<span class="tab-x" title="kill">×</span>`;
     t.onclick = (e) => { if (e.target.classList.contains("tab-x")) closeSession(s.id); else select(s.id); };
     t.ondblclick = () => renameSession(s.id);
     tabsEl.appendChild(t);
-  }
+  };
+  for (const s of sessInView()) mk(s, false);
+  // split partner living in another project gets a guest tab — click focuses it
+  const g = splitId && sessions.find((x) => x.id === splitId);
+  if (g && !inView(g.id)) mk(g, true);
 }
 
 // ---------- home: search + continue + compact project list ----------
@@ -1018,8 +1088,13 @@ function projMenu(e, p) {
   showMenu(e, items);
 }
 function sessMenu(e, s) {
-  showMenu(e, [
+  const items = [
     { label: "Open", run: () => openSession(s.id) },
+  ];
+  if (view === "work" && activeId && s.id !== activeId)
+    items.push({ label: s.id === splitId ? "Focus split pane" : "Show in split pane",
+      run: () => (s.id === splitId ? focusSide(s.id) : splitWith(s.id)) });
+  items.push(
     { label: "Rename…", run: async () => {
       const v = await askText("Rename session", s.name);
       if (v && v !== s.name) send({ type: "rename", id: s.id, name: v });
@@ -1027,10 +1102,11 @@ function sessMenu(e, s) {
     { label: "Copy working dir", run: () => { copyToClipboard(s.cwd || ""); toast("Path copied"); } },
     "-",
     { label: "Kill session", danger: true, run: () => {
-      if (view === "work" && inView(s.id)) closeSession(s.id); else send({ type: "kill", id: s.id });
+      if (view === "work" && (inView(s.id) || s.id === splitId)) closeSession(s.id); else send({ type: "kill", id: s.id });
       toast(`Killed “${s.name}”`);
     } },
-  ]);
+  );
+  showMenu(e, items);
 }
 
 // ---------- home: machines (tailnet peers) ----------
@@ -1406,7 +1482,7 @@ function hasAttentionSeq(d) {
 }
 const notifyAt = new Map(); // "id:reason" -> last toast/Notification ts
 function notifySession(id, reason) {
-  if (id === activeId && view === "work" && document.visibilityState === "visible") return; // you're looking at it
+  if (onScreen(id) && view === "work" && document.visibilityState === "visible") return; // you're looking at it
   notifiedSess.add(id);
   const t = tabsEl.querySelector(`[data-id="${id}"]`);
   if (t) t.classList.add("bell");
@@ -1414,7 +1490,7 @@ function notifySession(id, reason) {
   const sess = sessions.find((s) => s.id === id);
   const body = reason === "bell" ? "Process signaled attention" : "Session idle after output";
   const visible = document.visibilityState === "visible";
-  if (id === activeId && visible) return; // you're looking at it — the tab dot suffices
+  if (onScreen(id) && visible) return; // you're looking at it — the tab dot suffices
   const key = id + ":" + reason, now = Date.now();
   if (now - (notifyAt.get(key) || 0) < 60000) return; // max 1/min per session per reason
   notifyAt.set(key, now);
@@ -1433,7 +1509,11 @@ function clearNotify(id) {
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState !== "visible") return;
   document.title = titleFor();
-  if (view === "work" && activeId) { markSeen(activeId); refreshStates(); }
+  if (view === "work") {
+    if (activeId) markSeen(activeId);
+    if (splitId) markSeen(splitId); // the guest pane is on screen too
+    refreshStates();
+  }
 });
 window.addEventListener("focus", () => { document.title = titleFor(); });
 setInterval(() => { // idle detect: produced output then quiet ≥15s → notify once per busy→quiet edge
@@ -1442,7 +1522,7 @@ setInterval(() => { // idle detect: produced output then quiet ≥15s → notify
     if (!p.lastOutAt || p.idleNotified || now - p.lastOutAt < 15000) continue;
     const s = sessions.find((x) => x.id === id);
     if (!s || s.exited) continue;
-    if (id === activeId && document.visibilityState === "visible") continue;
+    if (onScreen(id) && document.visibilityState === "visible") continue;
     p.idleNotified = true;
     notifySession(id, "idle");
   }
@@ -1561,8 +1641,29 @@ document.addEventListener("keydown", (e) => {
 
 // ---------- command palette (Ctrl+K) ----------
 const palette = $("#palette"), palIn = $("#pal-in"), palList = $("#pal-list");
-let palAll = [], palIdx = 0, palShown = [];
+let palAll = [], palIdx = 0, palShown = [], palMode = "nav";
+function palSplitItems() { // sessions from every project + "new terminal" spawns — all land in the guest pane
+  const items = [];
+  const ss = [...sessions].filter((s) => s.id !== activeId)
+    .sort((a, b) => (inView(b.id) - inView(a.id)) || (a.exited - b.exited) || sessUsed(b) - sessUsed(a));
+  for (const s of ss) {
+    const w = sessWs(s) ? wsById(sessWs(s)) : null, ttl = sessTitle(s);
+    items.push({ kind: "TERM", s,
+      label: s.name + (s.exited ? " (exited)" : "") + (s.id === splitId ? " (in split)" : ""),
+      sub: `${w ? w.name : "Standalone"} · ${ttl || shortPath(s.cwd)}`,
+      hay: [s.name, w ? w.name : "", ttl, s.cwd],
+      run: () => splitWith(s.id, s.id === splitId) });
+  }
+  for (const w of [...workspaces].sort((a, b) => ((b.id === currentWs) - (a.id === currentWs)) || wsUsed(b) - wsUsed(a))) {
+    items.push({ kind: "PROJ", label: `New terminal — ${w.name}`, sub: `${w.path} · opens in the split pane`,
+      hay: [w.name, w.path, "new terminal"], run: () => newForSplit(w) });
+  }
+  items.push({ kind: "PROJ", label: "New terminal — Standalone", sub: "opens in the split pane",
+    hay: ["standalone", "new terminal"], run: () => newForSplit(null) });
+  return items;
+}
 function palItems() {
+  if (palMode === "split") return palSplitItems();
   const items = [];
   // sessions in MRU order — the one you were on before sits first, so Ctrl+K, Enter flips back
   const ss = [...sessions].sort((a, b) => (a.id === activeId) - (b.id === activeId) || (a.exited - b.exited) || sessUsed(b) - sessUsed(a));
@@ -1587,7 +1688,7 @@ function palItems() {
     { kind: "ACT", label: "Remote screen", sub: "view & control desktop", run: openScreen },
     { kind: "ACT", label: "Copy mode", sub: "copy terminal buffer", run: () => openCopy() },
     { kind: "ACT", label: "Search in terminal", sub: "Ctrl+F", run: () => setTimeout(openTermSearch, 0) },
-    { kind: "ACT", label: "Split terminal", sub: "two sessions side by side", run: () => toggleSplit() },
+    { kind: "ACT", label: "Split terminal…", sub: "two sessions side by side — any project", run: () => pickSplit() },
     { kind: "ACT", label: "Settings", sub: "font, theme, shell, keybar", run: () => openSettings() },
   );
   for (const it of items) if (!it.hay) it.hay = [it.label, it.sub];
@@ -1616,13 +1717,17 @@ function palSync() {
   const sel = palList.children[palIdx];
   if (sel && sel.scrollIntoView) sel.scrollIntoView({ block: "nearest" });
 }
-function openPalette() {
+function openPalette(mode = "nav") {
+  palMode = mode;
   palAll = palItems(); palIdx = 0; palIn.value = "";
+  palIn.placeholder = mode === "split"
+    ? "Split with a session — any project…"
+    : "Jump to session, project, or action…";
   palRender();
   palette.classList.remove("hidden");
   palIn.focus();
 }
-function closePalette() { palette.classList.add("hidden"); }
+function closePalette() { palette.classList.add("hidden"); palMode = "nav"; }
 palIn.addEventListener("input", () => { palIdx = 0; palRender(); });
 palIn.addEventListener("keydown", (e) => {
   if (e.key === "ArrowDown") { e.preventDefault(); palIdx = Math.min(palIdx + 1, palShown.length - 1); palSync(); }
@@ -1730,6 +1835,7 @@ $("#set-reset").onclick = () => {
   toast("Layout reset");
 };
 $("#split-btn").onclick = toggleSplit;
+$("#split-btn").oncontextmenu = (e) => { e.preventDefault(); pickSplit(); }; // pick any session, any project
 
 // ---------- files panel ----------
 let fpRoot = null, fpPath = "";
@@ -2541,6 +2647,7 @@ $("#new-cancel").onclick = closeModal;
 modal.onclick = (e) => { if (e.target === modal) closeModal(); };
 $("#new-browse").onclick = () => openPicker((p) => { cwdIn.value = p; });
 $("#new-ok").onclick = () => {
+  if (splitId) { wantSplitForNew = true; setTimeout(() => { wantSplitForNew = false; }, 8000); } // opens in the guest pane
   send({
     type: "create", shell: shellSel.value, cols: 120, rows: 32,
     name: nameIn.value || undefined,

@@ -477,6 +477,11 @@ body.touch-ui #keybar::-webkit-scrollbar, body.typebar #keybar::-webkit-scrollba
 #terms.split .term-pane.visible-side { flex: 0 0 calc(50% - 3px); width: calc(50% - 3px); min-width: 0; }
 #terms.split .term-pane.focused { box-shadow: inset 0 0 0 1.5px var(--accent); border-radius: 6px; }
 @media (max-width: 720px) { #split-btn { display: none; } }
+/* guest session: lives in the split pane but belongs to another project */
+.nav-sess.on-split { box-shadow: inset 0 0 0 1px var(--glass-brd-hi); }
+.nav-sess.on-split::after { content: "split"; font-size: 8.5px; font-weight: 700; letter-spacing: .7px; text-transform: uppercase; color: var(--accent3); flex-shrink: 0; }
+.tab.guest { background: rgba(139,123,255,.05); }
+.tab-ws { font-size: 9px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase; color: var(--accent3); background: var(--grad-soft); border: 1px solid rgba(139,123,255,.3); border-radius: 4px; padding: 0 5px; line-height: 1.6; max-width: 110px; overflow: hidden; text-overflow: ellipsis; }
 
 /* ---------- light theme ---------- */
 body.light {
