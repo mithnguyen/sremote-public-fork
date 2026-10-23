@@ -406,5 +406,9 @@ if ($leftOver.Count) {
 
 if ($relTag) { Write-Host "    Install complete - version $relTag" }
 Write-Host "    Local:     http://localhost:2209"
-Write-Host "    Tailscale: http://<this-machine-tailscale-ip>:2209"
+$tsIp = ""
+try { $tsIp = ((tailscale ip -4) 2>$null | Select-Object -First 1).Trim() } catch {}
+if (-not $tsIp) { $tsIp = "<this-machine-tailscale-ip>" }
+Write-Host "    Tailscale: http://${tsIp}:2209"
+Write-Host "    Agents:    http://${tsIp}:2209/remote.md  (give this URL to an AI agent on another machine)"
 Write-Host "    Dir:       $dir  (autostarts at logon)"

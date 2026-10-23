@@ -266,6 +266,80 @@ function withLog(s, cb) {
   setTimeout(() => { pendingAttach.delete(tok); done(null); }, 3000);
 }
 
+// GET /remote.md — instructions an agent on another machine reads before driving
+// this host: give it the IP, it fetches this and knows the rest. Generated per
+// request so host name, address, shells and projects are always current.
+function remoteGuide(req) {
+  const hostHdr = /^[\w.:\-\[\]]+$/.test(req.headers.host || "") ? req.headers.host : `${tailscaleIPv4() || "127.0.0.1"}:${PORT}`;
+  const base = `http://${hostHdr}`, addr = hostHdr.replace(/:\d+$/, "");
+  const shells = Object.keys(SHELLS), def = shells.includes("powershell") ? "powershell" : shells[0];
+  const win = IS_WIN;
+  const projects = state.workspaces.map((w) => `| ${w.name} | \`${w.path}\` | \`${w.id}\` |`).join("\n");
+  const live = sessionList().filter((s) => !s.exited).map((s) => `\`${s.name}\``).join(", ");
+  const ex = win ? "C:\\path\\to\\project" : "/path/to/project";
+  return `# Remote terminal on ${os.hostname()} (S-remote)
+
+You have been given access to **${os.hostname()}** (${win ? "Windows" : os.platform()}, address \`${addr}\`).
+Its terminal is driven over HTTP through S-remote at \`${base}\`. Every session you open shows up
+live in the owner's S-remote web UI, so they can watch or take over at any time.
+
+## 1. Setup (once)
+
+Needs Node 18+ on *your* machine. Download the CLI and point it at this host:
+
+\`\`\`bash
+curl -o ~/sremote.js ${base}/cli/sremote.js
+export SREMOTE_HOST=${hostHdr}            # PowerShell: $env:SREMOTE_HOST='${hostHdr}'
+node ~/sremote.js ls                       # connectivity check + list sessions
+\`\`\`
+
+If the host is unreachable: both machines must be on the same Tailscale network (\`tailscale status\`).
+
+## 2. Workflow
+
+1. **Open your own session per task** (default shell: \`${def}\`; available: ${shells.map((s) => `\`${s}\``).join(", ")}):
+   \`id=$(node ~/sremote.js new --cwd '${ex}' --name <task-name>)\`
+   — or \`--workspace <id>\` to open in a project below.
+2. **Commands that finish → \`run\`** (waits, prints output, exits with the command's exit code):
+   \`node ~/sremote.js run $id -- git status\`
+   Put \`--\` before commands that have their own \`--flags\`. Default timeout 600 s (\`--timeout N\`);
+   on timeout (exit 124) the command keeps running — read it later with \`read\`.
+3. **Long-running processes (dev servers, watchers) → \`send\` + \`wait\`:**
+   \`node ~/sremote.js send $id npm run dev\` then
+   \`node ~/sremote.js wait $id --for "ready|listening" --timeout 120\`
+4. **Interrupt / inspect:** \`node ~/sremote.js key $id ctrl-c\` · \`node ~/sremote.js tail $id\` ·
+   \`node ~/sremote.js read $id --since <offset>\`
+5. **Clean up:** \`node ~/sremote.js kill $id\` when the task is done (leave it if the user wants to see it).
+
+Full command list: \`node ~/sremote.js --help\`. \`<s>\` may be the session id, its exact name or an id prefix.
+
+## 3. Rules
+
+${win ? `- This is **Windows**: PowerShell syntax and \`C:\\...\` paths. From bash, single-quote commands so \`$\` survives.
+` : ""}- Pagers are disabled in sessions created with \`new\` (GIT_PAGER/PAGER=cat). Do not start full-screen
+  interactive programs (vim, less, TUIs) via \`run\` — they never finish; use \`send\`/\`key\` if you must.
+- Only touch sessions **you** created unless the user asks otherwise.${live ? ` Currently open: ${live}.` : ""}
+- Output is plain text (colors stripped), last 256 KB per session.
+- You act with the full rights of the logged-in user on this machine — no destructive commands
+  (deleting data, uninstalling, rebooting, pushing) without the user's explicit request.
+
+## 4. Projects on this host
+
+${projects ? `| name | path | workspace id |\n|---|---|---|\n${projects}` : "_(none registered — use \`--cwd\`)_"}
+
+## 5. Raw HTTP (if you can't run Node)
+
+\`\`\`
+GET    ${base}/api/sessions                       list
+POST   ${base}/api/sessions                       {"shell":"${def}","cwd":"...","name":"..."} → {"id"}
+POST   ${base}/api/sessions/<id>/input            {"line":"command"} (adds Enter) | {"data":"raw keys"} → {"offset"}
+GET    ${base}/api/sessions/<id>/output?since=<offset>&wait=20000
+                                                  → {"data","next","exited"}; poll with since=next
+DELETE ${base}/api/sessions/<id>                  kill
+\`\`\`
+`;
+}
+
 function createSession({ shell = "powershell", cwd, cols = 120, rows = 32, workspace, name }) {
   const id = `s${Date.now().toString(36)}-${++seq}`;
   const wsp = workspace ? workspaceById(workspace) : null;
@@ -567,6 +641,10 @@ const server = http.createServer((req, res) => {
       hostname: os.hostname(), tailscaleIp: tailscaleIPv4(), home: os.homedir(), root: ROOT,
       platform: os.platform(), shells: Object.keys(SHELLS),
     }));
+  }
+  if (url.pathname.toLowerCase() === "/remote.md") {
+    res.writeHead(200, { "Content-Type": "text/markdown; charset=utf-8", "Cache-Control": "no-cache" });
+    return res.end(remoteGuide(req));
   }
   if (url.pathname === "/api/browse" && req.method === "GET") {
     try {

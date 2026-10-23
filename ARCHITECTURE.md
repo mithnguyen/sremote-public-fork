@@ -102,6 +102,10 @@ GET  /api/sessions/:id/output?since=&tail=&wait=ms
                               {data, since, next, base, truncated, exited}; wait = long-poll ≤60s
 ```
 
+`GET /remote.md` (`remoteGuide`) — agent onboarding page generated per request
+from the Host header (address), hostname, `SHELLS`, workspaces and live session
+names: setup, workflow, rules, raw HTTP. Give an agent the IP, it reads this.
+
 Agent API: server.js keeps `s.log {text, base}` per session, fed from every
 broker `out`. Sessions older than the server process are seeded lazily from the
 broker scrollback (`withLog`, attach with a callback in `pendingAttach`;
